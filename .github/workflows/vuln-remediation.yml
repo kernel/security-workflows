@@ -1,0 +1,292 @@
+name: Vulnerability Remediation
+
+on:
+  workflow_call:
+    inputs:
+      go-version-file:
+        description: Path to go.mod for Go setup (empty to skip Go)
+        type: string
+        required: false
+        default: ''
+      setup-bun:
+        description: Whether to setup Bun
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install Socket CLI
+        run: npm install -g @socketsecurity/cli
+
+      - name: Run Socket scan
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+        run: |
+          socket scan create \
+            --repo="${{ github.event.repository.name }}" \
+            --branch=main \
+            --default-branch \
+            --report \
+            --json \
+            --fold=version \
+            > socket-report.json 2>/dev/null || echo '{"healthy":true,"alerts":{}}' > socket-report.json
+
+      - name: Upload scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: socket-report
+          path: socket-report.json
+
+  triage:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout prompts
+        uses: actions/checkout@v4
+        with:
+          repository: kernel/security-workflows
+          path: .vuln-remediation
+          sparse-checkout: .github/workflows/vuln-remediation/
+
+      - name: Download scan report
+        uses: actions/download-artifact@v4
+        with:
+          name: socket-report
+
+      - name: Install Cursor CLI
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
+
+      - name: Triage alerts
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+        run: |
+          export DATE="$(date -u +%Y-%m-%d)"
+          envsubst '${GITHUB_REPOSITORY} ${DATE}' < .vuln-remediation/.github/workflows/vuln-remediation/triage-prompt.md | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+
+      - name: Upload triage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-result
+          path: triage-result.json
+
+  fix:
+    needs: triage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout prompts
+        uses: actions/checkout@v4
+        with:
+          repository: kernel/security-workflows
+          path: .vuln-remediation
+          sparse-checkout: .github/workflows/vuln-remediation/
+
+      - name: Download triage results
+        uses: actions/download-artifact@v4
+        with:
+          name: triage-result
+
+      - name: Check for fixable alerts
+        id: check
+        run: |
+          if ! [ -f triage-result.json ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          FIX_COUNT=$(jq '[.alerts[] | select(.category == "fix")] | length' triage-result.json 2>/dev/null || echo "0")
+          if [ "$FIX_COUNT" = "0" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure git identity
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "kernel-internal[bot]"
+          git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
+
+      - name: Setup Go
+        if: steps.check.outputs.skip != 'true' && inputs.go-version-file != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+
+      - name: Setup Bun
+        if: steps.check.outputs.skip != 'true' && inputs.setup-bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        if: steps.check.outputs.skip != 'true' && inputs.setup-bun
+        run: sfw bun install
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+
+      - name: Install Cursor CLI
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
+
+      - name: Install Socket CLI
+        if: steps.check.outputs.skip != 'true'
+        run: npm install -g @socketsecurity/cli
+
+      - name: Apply fixes
+        if: steps.check.outputs.skip != 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+        run: |
+          export DATE="$(date -u +%Y-%m-%d)"
+          envsubst '${GITHUB_REPOSITORY} ${DATE}' < .vuln-remediation/.github/workflows/vuln-remediation/fix-prompt.md | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+
+      - name: Upload fix results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fix-result
+          path: fix-result.json
+          if-no-files-found: ignore
+
+  pr:
+    needs: [triage, fix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+
+      - name: Download triage results
+        uses: actions/download-artifact@v4
+        with:
+          name: triage-result
+        continue-on-error: true
+
+      - name: Download fix results
+        uses: actions/download-artifact@v4
+        with:
+          name: fix-result
+        continue-on-error: true
+
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          DATE="$(date -u +%Y-%m-%d)"
+          REPO="${{ github.repository }}"
+
+          FIXED_TABLE=""
+          DISMISSED_TABLE=""
+          DEFERRED_TABLE=""
+
+          if [ -f triage-result.json ]; then
+            ALERT_COUNT=$(jq '.alerts | length' triage-result.json 2>/dev/null || echo "0")
+            if [ "$ALERT_COUNT" = "0" ]; then
+              echo "No alerts to report."
+              exit 0
+            fi
+
+            DISMISSED_TABLE=$(jq -r '
+              .alerts[] | select(.category == "dismiss") |
+              "| \(.type) | \(.package) | \(.severity) | \(.reason) |"
+            ' triage-result.json 2>/dev/null || echo "")
+
+            DEFERRED_TABLE=$(jq -r '
+              .alerts[] | select(.category == "defer") |
+              "| \(.cve // "N/A") | \(.package) | \(.severity) | \(.reason) |"
+            ' triage-result.json 2>/dev/null || echo "")
+          fi
+
+          if [ -f fix-result.json ]; then
+            FIXED_TABLE=$(jq -r '
+              .fixed[] |
+              "| \(.cve) | \(.package) | \(.ecosystem) | \(.old_version) | \(.new_version) | \(.manifest) |"
+            ' fix-result.json 2>/dev/null || echo "")
+
+            REVERTED=$(jq -r '
+              .reverted[] |
+              "| \(.cve) | \(.package) | \(.ecosystem) | \(.reason) |"
+            ' fix-result.json 2>/dev/null || echo "")
+            if [ -n "$REVERTED" ]; then
+              DEFERRED_TABLE="${DEFERRED_TABLE}
+          ${REVERTED}"
+            fi
+          fi
+
+          if [ -z "$FIXED_TABLE" ] && [ -z "$DISMISSED_TABLE" ] && [ -z "$DEFERRED_TABLE" ]; then
+            echo "No results to report."
+            exit 0
+          fi
+
+          BODY="## Vulnerability Remediation — ${DATE}
+
+          ### Fixed
+          | CVE | Package | Ecosystem | Old Version | New Version | Manifest |
+          |-----|---------|-----------|-------------|-------------|----------|
+          ${FIXED_TABLE:-| (none) | | | | | |}
+
+          ### Skipped (non-actionable)
+          | Alert Type | Package | Severity | Reason |
+          |------------|---------|----------|--------|
+          ${DISMISSED_TABLE:-| (none) | | | |}
+
+          ### Deferred (needs human review)
+          | CVE | Package | Severity | Reason |
+          |-----|---------|----------|--------|
+          ${DEFERRED_TABLE:-| (none) | | | |}"
+
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head security/vuln-remediation --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            gh pr edit "$EXISTING_PR" --repo "$REPO" --body "$BODY"
+            echo "Updated PR #${EXISTING_PR}"
+          elif [ -n "$FIXED_TABLE" ]; then
+            gh pr create \
+              --repo "$REPO" \
+              --head security/vuln-remediation \
+              --base main \
+              --title "security: vulnerability remediation" \
+              --body "$BODY"
+          else
+            echo "No fixes applied and no existing PR. Logging results only."
+            echo "$BODY"
+          fi
