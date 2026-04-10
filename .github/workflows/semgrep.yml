@@ -34,6 +34,7 @@ jobs:
             --config p/secrets \
             --config p/github-actions \
             ${{ inputs.extra-configs }} \
+            --severity ERROR --severity WARNING \
             --baseline-commit ${{ github.event.pull_request.base.sha }} \
             --json \
             -o semgrep-results.json || true
@@ -86,6 +87,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout prompts
+        uses: actions/checkout@v4
+        with:
+          repository: kernel/security-workflows
+          path: .security-workflows
+          sparse-checkout: .github/workflows/semgrep-triage-prompt.md
+
       - name: Download results
         uses: actions/download-artifact@v4
         with:
@@ -102,4 +110,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export CODEBASE_DESCRIPTION="${{ inputs.codebase-description }}"
-          envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' < <(curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md") | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --force --output-format=text
+          envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' < .security-workflows/.github/workflows/semgrep-triage-prompt.md | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --force --output-format=text
