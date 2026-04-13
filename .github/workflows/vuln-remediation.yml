@@ -59,13 +59,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Checkout prompts
-        uses: actions/checkout@v4
-        with:
-          repository: kernel/security-workflows
-          path: .vuln-remediation
-          sparse-checkout: .github/workflows/vuln-remediation/
-
       - name: Download scan report
         uses: actions/download-artifact@v4
         with:
@@ -82,7 +75,7 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           export DATE="$(date -u +%Y-%m-%d)"
-          envsubst '${GITHUB_REPOSITORY} ${DATE}' < .vuln-remediation/.github/workflows/vuln-remediation/triage-prompt.md | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
 
       - name: Upload triage results
         uses: actions/upload-artifact@v4
@@ -106,13 +99,6 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
-
-      - name: Checkout prompts
-        uses: actions/checkout@v4
-        with:
-          repository: kernel/security-workflows
-          path: .vuln-remediation
-          sparse-checkout: .github/workflows/vuln-remediation/
 
       - name: Download triage results
         uses: actions/download-artifact@v4
@@ -173,7 +159,7 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           export DATE="$(date -u +%Y-%m-%d)"
-          envsubst '${GITHUB_REPOSITORY} ${DATE}' < .vuln-remediation/.github/workflows/vuln-remediation/fix-prompt.md | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
 
       - name: Upload fix results
         if: always()
