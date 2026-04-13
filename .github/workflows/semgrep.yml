@@ -84,13 +84,6 @@ jobs:
     needs: scan
     if: needs.scan.outputs.findings_count != '0' && fromJson(needs.scan.outputs.findings_count) <= 20
     steps:
-      - name: Generate app token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.ADMIN_APP_ID }}
-          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -98,7 +91,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: kernel/security-workflows
-          token: ${{ steps.app-token.outputs.token }}
           path: .security-workflows
           sparse-checkout: .github/workflows/semgrep-triage-prompt.md
 
