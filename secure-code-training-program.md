@@ -117,6 +117,23 @@ This program satisfies secure code training requirements across:
 - **NIST CSF** — PR.AT-1 (Awareness and Training)
 - **PCI DSS** — Requirement 6.5 (Secure Coding Training)
 
+## Scope and Exemptions
+
+This program applies to all personnel who write, review, deploy, or maintain application source code or infrastructure-as-code in Kernel's production environment. Because training is delivered through automated tooling on pull requests, participation is inherent to the development workflow — anyone who opens a PR receives training.
+
+Personnel whose roles do not involve software development or code access are exempt from this program:
+
+| Role | Exemption Reason | Alternative Training |
+|------|-----------------|---------------------|
+| CEO | Non-engineering role; no code access | General security awareness training |
+| COO / Product Operations | Non-engineering role; no code access | General security awareness training |
+| Customer-facing roles (non-coding) | No access to source code repositories | General security awareness training |
+| Contractors (non-engineering) | No access to source code repositories | General security awareness training |
+
+Exempted personnel are still required to complete **general security awareness training** covering phishing, password hygiene, data handling, and incident reporting.
+
+This exemption list is reviewed whenever personnel roles change or at the annual policy review cycle.
+
 ## Program Ownership
 
 - **Program Owner:** Engineering Leadership
