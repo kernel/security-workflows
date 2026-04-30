@@ -271,6 +271,7 @@ jobs:
               --head security/vuln-remediation \
               --base main \
               --title "security: vulnerability remediation" \
+              --reviewer "kernel/security" \
               --body "$BODY"
           else
             echo "No fixes applied and no existing PR. Logging results only."
