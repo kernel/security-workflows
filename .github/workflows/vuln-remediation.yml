@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       go-version-file:
-        description: Path to go.mod for Go setup (empty to skip Go)
+        description: Path to any go.mod for Go version detection (empty to skip Go)
         type: string
         required: false
         default: ''
@@ -13,6 +13,16 @@ on:
         type: boolean
         required: false
         default: false
+      setup-python:
+        description: Whether to setup Python and uv
+        type: boolean
+        required: false
+        default: false
+      python-version:
+        description: Python version to install
+        type: string
+        required: false
+        default: '3.11'
 
 jobs:
   scan:
@@ -135,11 +145,21 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.setup-bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Install dependencies
+      - name: Install JS dependencies
         if: steps.check.outputs.skip != 'true' && inputs.setup-bun
         run: sfw bun install
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+
+      - name: Setup Python
+        if: steps.check.outputs.skip != 'true' && inputs.setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        if: steps.check.outputs.skip != 'true' && inputs.setup-python
+        run: pip install uv
 
       - name: Install Cursor CLI
         if: steps.check.outputs.skip != 'true'
