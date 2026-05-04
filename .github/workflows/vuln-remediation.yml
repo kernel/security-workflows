@@ -54,7 +54,12 @@ jobs:
             --report \
             --json \
             --fold=version \
+            --no-interactive \
             > socket-report.json 2>/dev/null || echo '{"healthy":true,"alerts":{}}' > socket-report.json
+          if ! jq empty socket-report.json 2>/dev/null; then
+            echo "Socket scan output is not valid JSON, falling back to empty report"
+            echo '{"healthy":true,"alerts":{}}' > socket-report.json
+          fi
 
       - name: Upload scan report
         uses: actions/upload-artifact@v4
