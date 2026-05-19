@@ -47,6 +47,8 @@ jobs:
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
+          echo "::group::Socket scan"
+          set +e
           socket scan create \
             --repo="${{ github.event.repository.name }}" \
             --branch=main \
@@ -55,10 +57,22 @@ jobs:
             --json \
             --fold=version \
             --no-interactive \
-            > socket-report.json 2>/dev/null || echo '{"healthy":true,"alerts":{}}' > socket-report.json
-          if ! jq empty socket-report.json 2>/dev/null; then
-            echo "Socket scan output is not valid JSON, falling back to empty report"
+            > socket-report.json 2>&1
+          SCAN_EXIT=$?
+          set -e
+          echo "::endgroup::"
+          echo "Socket scan exit code: $SCAN_EXIT"
+          if [ $SCAN_EXIT -ne 0 ]; then
+            echo "::warning::Socket scan failed (exit $SCAN_EXIT). Output:"
+            cat socket-report.json || true
             echo '{"healthy":true,"alerts":{}}' > socket-report.json
+          elif ! jq empty socket-report.json 2>/dev/null; then
+            echo "::warning::Socket scan output is not valid JSON:"
+            head -20 socket-report.json
+            echo '{"healthy":true,"alerts":{}}' > socket-report.json
+          else
+            ALERT_COUNT=$(jq '.alerts | if type == "object" then length elif type == "array" then length else 0 end' socket-report.json 2>/dev/null || echo "0")
+            echo "Socket scan succeeded. Alert count: $ALERT_COUNT"
           fi
 
       - name: Upload scan report
