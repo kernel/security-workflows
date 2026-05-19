@@ -48,24 +48,35 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           echo "Socket CLI version: $(socket --version 2>/dev/null || echo unknown)"
-          set +e
-          socket scan create \
-            --org=kernel \
-            --repo="${{ github.event.repository.name }}" \
-            --branch=main \
-            --default-branch \
-            --report \
-            --report-level=warn \
-            --json \
-            --fold=version \
-            --no-interactive \
-            > socket-raw.json 2>&1
-          SCAN_EXIT=$?
-          set -e
-          echo "Socket scan exit code: $SCAN_EXIT"
-          if [ $SCAN_EXIT -ne 0 ]; then
-            echo "::warning::Socket scan failed (exit $SCAN_EXIT):"
+          for ATTEMPT in 1 2 3; do
+            echo "Scan attempt $ATTEMPT/3..."
+            set +e
+            socket scan create \
+              --org=kernel \
+              --repo="${{ github.event.repository.name }}" \
+              --branch=main \
+              --default-branch \
+              --report \
+              --report-level=warn \
+              --json \
+              --fold=version \
+              --no-interactive \
+              > socket-raw.json 2>&1
+            SCAN_EXIT=$?
+            set -e
+            echo "Socket scan exit code: $SCAN_EXIT"
+            if [ $SCAN_EXIT -eq 0 ]; then
+              break
+            fi
+            echo "::warning::Socket scan attempt $ATTEMPT failed (exit $SCAN_EXIT):"
             cat socket-raw.json || true
+            if [ $ATTEMPT -lt 3 ]; then
+              echo "Retrying in 15s..."
+              sleep 15
+            fi
+          done
+          if [ $SCAN_EXIT -ne 0 ]; then
+            echo "::error::Socket scan failed after 3 attempts"
             echo '{"healthy":true,"alerts":{}}' > socket-report.json
           else
             # Socket CLI v1.x mixes progress text with JSON on stdout.
