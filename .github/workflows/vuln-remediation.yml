@@ -337,7 +337,7 @@ jobs:
           EXISTING_PR=$(gh pr list --repo "$REPO" --head security/vuln-remediation --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            gh pr edit "$EXISTING_PR" --repo "$REPO" --body "$BODY"
+            gh pr edit "$EXISTING_PR" --repo "$REPO" --body "$BODY" --add-assignee ulziibay-kernel --add-reviewer ulziibay-kernel
             echo "Updated PR #${EXISTING_PR}"
           elif [ -n "$FIXED_TABLE" ]; then
             gh pr create \
@@ -345,7 +345,8 @@ jobs:
               --head security/vuln-remediation \
               --base main \
               --title "security: vulnerability remediation" \
-              --reviewer "kernel/security" \
+              --assignee ulziibay-kernel \
+              --reviewer ulziibay-kernel \
               --body "$BODY"
           else
             echo "No fixes applied and no existing PR. Logging results only."
