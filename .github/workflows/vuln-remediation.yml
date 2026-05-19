@@ -233,7 +233,7 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           export DATE="$(date -u +%Y-%m-%d)"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
 
       - name: Upload fix results
         if: always()
