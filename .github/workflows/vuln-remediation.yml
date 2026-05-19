@@ -48,8 +48,10 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           echo "::group::Socket scan"
+          echo "Socket CLI version: $(socket --version 2>/dev/null || echo unknown)"
           set +e
           socket scan create \
+            --org=kernel \
             --repo="${{ github.event.repository.name }}" \
             --branch=main \
             --default-branch \
