@@ -47,7 +47,6 @@ jobs:
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
-          echo "::group::Socket scan"
           echo "Socket CLI version: $(socket --version 2>/dev/null || echo unknown)"
           set +e
           socket scan create \
@@ -59,20 +58,38 @@ jobs:
             --json \
             --fold=version \
             --no-interactive \
-            > socket-report.json 2>&1
+            > socket-raw.json 2>&1
           SCAN_EXIT=$?
           set -e
-          echo "::endgroup::"
           echo "Socket scan exit code: $SCAN_EXIT"
           if [ $SCAN_EXIT -ne 0 ]; then
-            echo "::warning::Socket scan failed (exit $SCAN_EXIT). Output:"
-            cat socket-report.json || true
-            echo '{"healthy":true,"alerts":{}}' > socket-report.json
-          elif ! jq empty socket-report.json 2>/dev/null; then
-            echo "::warning::Socket scan output is not valid JSON:"
-            head -20 socket-report.json
+            echo "::warning::Socket scan failed (exit $SCAN_EXIT):"
+            cat socket-raw.json || true
             echo '{"healthy":true,"alerts":{}}' > socket-report.json
           else
+            # Socket CLI v1.x mixes progress text with JSON on stdout.
+            # Extract the JSON object that starts with {"ok": or {"healthy":
+            if jq empty socket-raw.json 2>/dev/null; then
+              cp socket-raw.json socket-report.json
+            elif grep -q '"ok"' socket-raw.json; then
+              # Extract from first { to end, then pull .data if wrapped in {ok, data}
+              sed -n '/^{/,$p' socket-raw.json > socket-extracted.json
+              if jq empty socket-extracted.json 2>/dev/null; then
+                HAS_DATA=$(jq 'has("data")' socket-extracted.json 2>/dev/null || echo "false")
+                if [ "$HAS_DATA" = "true" ]; then
+                  jq '.data' socket-extracted.json > socket-report.json
+                else
+                  cp socket-extracted.json socket-report.json
+                fi
+              else
+                echo "::warning::Could not extract valid JSON from Socket output"
+                echo '{"healthy":true,"alerts":{}}' > socket-report.json
+              fi
+            else
+              echo "::warning::Socket output is not valid JSON:"
+              head -20 socket-raw.json
+              echo '{"healthy":true,"alerts":{}}' > socket-report.json
+            fi
             ALERT_COUNT=$(jq '.alerts | if type == "object" then length elif type == "array" then length else 0 end' socket-report.json 2>/dev/null || echo "0")
             echo "Socket scan succeeded. Alert count: $ALERT_COUNT"
           fi
