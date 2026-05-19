@@ -186,9 +186,7 @@ jobs:
 
       - name: Install JS dependencies
         if: steps.check.outputs.skip != 'true' && inputs.setup-bun
-        run: sfw bun install
-        env:
-          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+        run: bun install
 
       - name: Setup Python
         if: steps.check.outputs.skip != 'true' && inputs.setup-python
