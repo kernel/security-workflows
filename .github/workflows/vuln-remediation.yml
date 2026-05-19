@@ -179,17 +179,22 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Configure git identity
+      - name: Configure git identity and private module access
         if: steps.check.outputs.skip != 'true'
         run: |
           git config user.name "kernel-internal[bot]"
           git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+        env:
+          GOPRIVATE: github.com/kernel/*
 
       - name: Setup Go
         if: steps.check.outputs.skip != 'true' && inputs.go-version-file != ''
         uses: actions/setup-go@v5
         with:
           go-version-file: ${{ inputs.go-version-file }}
+        env:
+          GOPRIVATE: github.com/kernel/*
 
       - name: Setup Bun
         if: steps.check.outputs.skip != 'true' && inputs.setup-bun
@@ -223,6 +228,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GOPRIVATE: github.com/kernel/*
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
