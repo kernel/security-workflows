@@ -22,11 +22,12 @@ If the report shows `"healthy": true` and the `alerts` map is empty, write this 
 ```
 
 The Socket report nests alerts by ecosystem, package, version, file, and location. Flatten these into a list. For each alert, extract:
-- Alert type (e.g., `cve`, `installScripts`, `networkAccess`, `envVars`)
-- Severity: `error`, `warn`, `monitor`, `ignore`
-- Package name and version
-- Ecosystem (npm, go, pypi)
-- CVE ID if the alert type is `cve`
+- Alert type (e.g., `criticalCVE`, `cve`, `installScripts`, `networkAccess`, `envVars`)
+- Severity (`policy` field): `error`, `warn`, `monitor`, `ignore`
+- Package name (full module path, e.g., `google.golang.org/grpc`) and version
+- Ecosystem (`golang` → `go`, `npm`, `pypi`)
+- The `url` field pointing to Socket's package page
+- CVE ID: Socket does NOT include CVE IDs in the JSON. For alerts where `type` contains `cve` or `CVE`, fetch the `url` field with `curl -fsSL <url>` and extract CVE IDs (pattern: `CVE-\d{4}-\d+`) from the page content. If multiple CVEs, use the first one.
 
 Focus only on alerts with severity `error` or `warn`. Skip `monitor` and `ignore`.
 
@@ -48,7 +49,7 @@ For each alert, classify as one of: `fix`, `defer`, `dismiss`.
 
 ### fix
 
-- Alert type is `cve`
+- Alert type is `cve` or `criticalCVE`
 - Runtime/production dependency
 - In a production manifest
 - A newer version likely exists
