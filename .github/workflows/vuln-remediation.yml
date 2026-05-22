@@ -57,7 +57,7 @@ jobs:
               --branch=main \
               --default-branch \
               --report \
-              --report-level=warn \
+              --report-level=monitor \
               --json \
               --fold=version \
               --no-interactive \
