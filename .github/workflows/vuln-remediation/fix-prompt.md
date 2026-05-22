@@ -22,16 +22,9 @@ If there are no `fix` alerts, write this to `fix-result.json` and exit:
 {"fixed": [], "reverted": [], "summary": "No alerts to fix."}
 ```
 
-# Step 2 — Create branch
+# Step 2 — Apply fixes
 
-Run these commands now:
-
-```
-git fetch origin security/vuln-remediation 2>/dev/null || true
-git checkout -B security/vuln-remediation origin/main
-```
-
-# Step 3 — Apply fixes
+The branch `security/vuln-remediation` is already checked out and reset to `origin/main`. Do NOT create or switch branches.
 
 For each `fix` alert, grouped by manifest file, run commands immediately:
 
@@ -54,7 +47,7 @@ go mod tidy
 `cd` into the directory containing the manifest, then:
 - Edit the version constraint, then run `uv sync` or `pip install -r requirements.txt`.
 
-# Step 4 — Verify each fix
+# Step 3 — Verify each fix
 
 After each dependency bump, run:
 
@@ -66,11 +59,11 @@ If build or test fails due to the upgrade:
 2. Record the alert as `reverted` with the failure reason
 3. Continue with the next alert
 
-# Step 5 — Format
+# Step 4 — Format
 
 Run `bun run format` if the command exists, otherwise skip.
 
-# Step 6 — Commit and push
+# Step 5 — Commit and push
 
 If any fixes succeeded, run:
 ```
@@ -79,7 +72,7 @@ git commit -m "security: vulnerability remediation (${DATE})"
 git push -f origin security/vuln-remediation
 ```
 
-# Step 7 — Write output
+# Step 6 — Write output
 
 Write `fix-result.json` with this exact schema:
 

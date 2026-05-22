@@ -188,6 +188,11 @@ jobs:
         env:
           GOPRIVATE: github.com/kernel/*
 
+      - name: Reset remediation branch to main
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git checkout -B security/vuln-remediation origin/main
+
       - name: Setup Go
         if: steps.check.outputs.skip != 'true' && inputs.go-version-file != ''
         uses: actions/setup-go@v5
