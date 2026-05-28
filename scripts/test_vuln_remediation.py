@@ -109,6 +109,23 @@ class NormalizeAndPolicyTests(unittest.TestCase):
         self.assertEqual(context["fixes"][0]["package"], "google.golang.org/grpc")
         self.assertEqual(context["fixes"][0]["target_version"], "v1.81.1")
 
+    def test_manager_limits_socket_plan_batch_size(self) -> None:
+        context = vr.build_context(
+            {"alerts": []},
+            {
+                "type": "only-direct-dependency-upgrades",
+                "fixes": {
+                    "GHSA-one": {"directDependencies": [{"purl": "pkg:npm/one@1.0.0", "fixedVersion": "1.0.1"}]},
+                    "GHSA-two": {"directDependencies": [{"purl": "pkg:npm/two@1.0.0", "fixedVersion": "1.0.1"}]},
+                },
+            },
+            max_fixes=1,
+        )
+
+        self.assertEqual([item["id"] for item in context["fixes"]], ["GHSA-one"])
+        self.assertEqual(context["deferred"][0]["id"], "GHSA-two")
+        self.assertIn("limited to 1 fix", context["deferred"][0]["reason"])
+
     def test_manager_focuses_on_reachable_and_potentially_reachable(self) -> None:
         fix_plan = {
             "type": "only-direct-dependency-upgrades",
