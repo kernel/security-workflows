@@ -276,6 +276,7 @@ jobs:
 
       - name: Apply fixes
         if: steps.check.outputs.skip != 'true'
+        timeout-minutes: 10
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GOPRIVATE: github.com/kernel/*
