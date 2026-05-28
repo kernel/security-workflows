@@ -23,6 +23,11 @@ on:
         type: string
         required: false
         default: '3.11'
+      security-workflows-ref:
+        description: Ref of kernel/security-workflows to fetch shared scripts and prompts from
+        type: string
+        required: false
+        default: main
 
 jobs:
   scan:
@@ -112,6 +117,19 @@ jobs:
           name: socket-report
           path: socket-report.json
 
+      - name: Normalize Socket report
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/scripts/vuln_remediation.py -o /tmp/vuln_remediation.py
+          python3 /tmp/vuln_remediation.py normalize \
+            --input socket-report.json \
+            --output remediation-input.json
+
+      - name: Upload normalized remediation input
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediation-input
+          path: remediation-input.json
+
   triage:
     needs: scan
     runs-on: ubuntu-latest
@@ -119,29 +137,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download scan report
+      - name: Download normalized remediation input
         uses: actions/download-artifact@v4
         with:
-          name: socket-report
+          name: remediation-input
 
-      - name: Install Cursor CLI
-        run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
+      - name: Install Socket CLI
+        run: npm install -g @socketsecurity/cli
 
-      - name: Triage alerts
+      - name: Ask Socket for a fix plan
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
-          export DATE="$(date -u +%Y-%m-%d)"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --trust --force --output-format=text
+          set +e
+          socket fix . \
+            --no-apply-fixes \
+            --no-major-updates \
+            --show-affected-direct-dependencies \
+            --json \
+            --output-file socket-fix-plan.json
+          FIX_PLAN_EXIT=$?
+          set -e
+          if [ $FIX_PLAN_EXIT -ne 0 ] || ! jq empty socket-fix-plan.json 2>/dev/null; then
+            echo "::warning::Socket fix planning failed; manager will defer unplanned or insufficiently described fixes."
+            echo '{}' > socket-fix-plan.json
+          fi
+
+      - name: Build remediation context
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/scripts/vuln_remediation.py -o /tmp/vuln_remediation.py
+          python3 /tmp/vuln_remediation.py build-context \
+            --input remediation-input.json \
+            --fix-plan socket-fix-plan.json \
+            --output remediation-context.json
+          cp remediation-context.json triage-result.json
 
       - name: Upload triage results
         uses: actions/upload-artifact@v4
         with:
           name: triage-result
-          path: triage-result.json
+          path: |
+            triage-result.json
+            remediation-context.json
+            socket-fix-plan.json
 
   fix:
     needs: triage
@@ -168,11 +206,11 @@ jobs:
       - name: Check for fixable alerts
         id: check
         run: |
-          if ! [ -f triage-result.json ]; then
+          if ! [ -f remediation-context.json ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-          FIX_COUNT=$(jq '[.alerts[] | select(.category == "fix")] | length' triage-result.json 2>/dev/null || echo "0")
+          FIX_COUNT=$(jq '.fixes | length' remediation-context.json 2>/dev/null || echo "0")
           if [ "$FIX_COUNT" = "0" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
           else
@@ -234,18 +272,83 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GOPRIVATE: github.com/kernel/*
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
-          export DATE="$(date -u +%Y-%m-%d)"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+          FIX_IDS=$(jq -r '.fixes[].id' remediation-context.json | paste -sd, -)
+          set +e
+          socket fix . \
+            --id "$FIX_IDS" \
+            --no-major-updates \
+            --json \
+            --output-file socket-fix-apply.json
+          SOCKET_FIX_EXIT=$?
+          set -e
+          if [ $SOCKET_FIX_EXIT -ne 0 ]; then
+            echo "::warning::Socket fix failed; invoking bounded fallback agent."
+          fi
+
+          if git diff --quiet; then
+            export DATE="$(date -u +%Y-%m-%d)"
+            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+          fi
+
+      - name: Validate remediation diff
+        id: diff
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/scripts/vuln_remediation.py -o /tmp/vuln_remediation.py
+          git diff --name-only > changed-files.txt
+          if [ ! -s changed-files.txt ]; then
+            echo '{"fixed": [], "reverted": [], "summary": "No dependency changes were produced."}' > fix-result.json
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          python3 /tmp/vuln_remediation.py validate-diff \
+            --repo-root . \
+            --context remediation-context.json \
+            --changed-files changed-files.txt \
+            --output diff-validation.json
+
+      - name: Confirm fixes
+        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
+        run: |
+          set +e
+          python3 /tmp/vuln_remediation.py confirm \
+            --repo-root . \
+            --context remediation-context.json \
+            --output confirmation-result.json
+          CONFIRM_EXIT=$?
+          set -e
+          python3 /tmp/vuln_remediation.py summarize-fix \
+            --context remediation-context.json \
+            --confirmation confirmation-result.json \
+            --output fix-result.json
+          exit $CONFIRM_EXIT
+
+      - name: Commit and push validated changes
+        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
+        run: |
+          if ! jq -e '.fixed | length > 0' fix-result.json >/dev/null; then
+            echo "No confirmed fixes to commit."
+            exit 0
+          fi
+          git add --pathspec-from-file=changed-files.txt
+          git diff --cached --quiet && exit 0
+          git commit -m "security: vulnerability remediation ($(date -u +%Y-%m-%d))"
+          git push --force-with-lease origin security/vuln-remediation
 
       - name: Upload fix results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fix-result
-          path: fix-result.json
+          path: |
+            fix-result.json
+            confirmation-result.json
+            diff-validation.json
+            changed-files.txt
+            socket-fix-apply.json
           if-no-files-found: ignore
 
   pr:
@@ -272,79 +375,38 @@ jobs:
           name: fix-result
         continue-on-error: true
 
+      - name: Render PR body
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/scripts/vuln_remediation.py -o /tmp/vuln_remediation.py
+          [ -f triage-result.json ] || echo '{"deferred":[]}' > triage-result.json
+          [ -f fix-result.json ] || echo '{"fixed":[],"reverted":[]}' > fix-result.json
+          [ -f confirmation-result.json ] || echo '{"ok":false,"confirmed":[],"failures":[]}' > confirmation-result.json
+          python3 /tmp/vuln_remediation.py render-pr-body \
+            --triage triage-result.json \
+            --fix-result fix-result.json \
+            --confirmation confirmation-result.json \
+            --output pr-body.md
+
       - name: Create or update PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          DATE="$(date -u +%Y-%m-%d)"
-          REPO="${{ github.repository }}"
-
-          FIXED_TABLE=""
-          DISMISSED_TABLE=""
-          DEFERRED_TABLE=""
-
-          if [ -f triage-result.json ]; then
-            ALERT_COUNT=$(jq '.alerts | length' triage-result.json 2>/dev/null || echo "0")
-            if [ "$ALERT_COUNT" = "0" ]; then
-              echo "No alerts to report."
-              exit 0
-            fi
-
-            DISMISSED_TABLE=$(jq -r '
-              .alerts[] | select(.category == "dismiss") |
-              "| \(.type) | \(.package) | \(.severity) | \(.reason) |"
-            ' triage-result.json 2>/dev/null || echo "")
-
-            DEFERRED_TABLE=$(jq -r '
-              .alerts[] | select(.category == "defer") |
-              "| \(.cve // "N/A") | \(.package) | \(.severity) | \(.reason) |"
-            ' triage-result.json 2>/dev/null || echo "")
-          fi
-
-          if [ -f fix-result.json ]; then
-            FIXED_TABLE=$(jq -r '
-              .fixed[] |
-              "| \(.cve) | \(.package) | \(.ecosystem) | \(.old_version) | \(.new_version) | \(.manifest) |"
-            ' fix-result.json 2>/dev/null || echo "")
-
-            REVERTED=$(jq -r '
-              .reverted[] |
-              "| \(.cve) | \(.package) | \(.ecosystem) | \(.reason) |"
-            ' fix-result.json 2>/dev/null || echo "")
-            if [ -n "$REVERTED" ]; then
-              DEFERRED_TABLE="${DEFERRED_TABLE}
-          ${REVERTED}"
-            fi
-          fi
-
-          if [ -z "$FIXED_TABLE" ] && [ -z "$DISMISSED_TABLE" ] && [ -z "$DEFERRED_TABLE" ]; then
-            echo "No results to report."
+          if [ "${{ needs.fix.result }}" != "success" ]; then
+            echo "Fix job did not complete successfully; not creating or updating a remediation PR."
             exit 0
           fi
-
-          BODY="## Vulnerability Remediation — ${DATE}
-
-          ### Fixed
-          | CVE | Package | Ecosystem | Old Version | New Version | Manifest |
-          |-----|---------|-----------|-------------|-------------|----------|
-          ${FIXED_TABLE:-| (none) | | | | | |}
-
-          ### Skipped (non-actionable)
-          | Alert Type | Package | Severity | Reason |
-          |------------|---------|----------|--------|
-          ${DISMISSED_TABLE:-| (none) | | | |}
-
-          ### Deferred (needs human review)
-          | CVE | Package | Severity | Reason |
-          |-----|---------|----------|--------|
-          ${DEFERRED_TABLE:-| (none) | | | |}"
+          REPO="${{ github.repository }}"
+          if ! jq -e '.fixed | length > 0' fix-result.json >/dev/null 2>&1; then
+            echo "No confirmed fixes; not creating a PR."
+            exit 0
+          fi
 
           EXISTING_PR=$(gh pr list --repo "$REPO" --head security/vuln-remediation --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            gh pr edit "$EXISTING_PR" --repo "$REPO" --body "$BODY" --add-assignee ulziibay-kernel --add-reviewer ulziibay-kernel
+            gh pr edit "$EXISTING_PR" --repo "$REPO" --body-file pr-body.md --add-assignee ulziibay-kernel --add-reviewer ulziibay-kernel
             echo "Updated PR #${EXISTING_PR}"
-          elif [ -n "$FIXED_TABLE" ]; then
+          else
             gh pr create \
               --repo "$REPO" \
               --head security/vuln-remediation \
@@ -352,8 +414,5 @@ jobs:
               --title "security: vulnerability remediation" \
               --assignee ulziibay-kernel \
               --reviewer ulziibay-kernel \
-              --body "$BODY"
-          else
-            echo "No fixes applied and no existing PR. Logging results only."
-            echo "$BODY"
+              --body-file pr-body.md
           fi

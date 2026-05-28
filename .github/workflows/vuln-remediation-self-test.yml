@@ -1,0 +1,45 @@
+name: Vulnerability Remediation Self-Test
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/vuln-remediation.yml'
+      - '.github/workflows/vuln-remediation-self-test.yml'
+      - '.github/workflows/vuln-remediation/**'
+      - 'scripts/vuln_remediation.py'
+      - 'scripts/test_vuln_remediation.py'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/vuln-remediation.yml'
+      - '.github/workflows/vuln-remediation-self-test.yml'
+      - '.github/workflows/vuln-remediation/**'
+      - 'scripts/vuln_remediation.py'
+      - 'scripts/test_vuln_remediation.py'
+  workflow_dispatch:
+    inputs:
+      run-live-remediation:
+        description: Run the reusable remediation workflow against kernel/security-workflows
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  tests:
+    name: Remediation helper tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run unit and fixture tests
+        run: python3 -m unittest scripts.test_vuln_remediation
+
+  self-remediation:
+    name: Manual self remediation
+    if: github.event_name == 'workflow_dispatch' && inputs['run-live-remediation']
+    uses: ./.github/workflows/vuln-remediation.yml
+    with:
+      security-workflows-ref: ${{ github.ref_name }}
+    secrets: inherit
