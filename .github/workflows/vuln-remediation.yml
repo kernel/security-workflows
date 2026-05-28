@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: main
+      max-fixes:
+        description: Maximum number of Socket-planned advisories to remediate in one PR
+        type: number
+        required: false
+        default: 1
 
 jobs:
   scan:
@@ -170,6 +175,7 @@ jobs:
           python3 /tmp/vuln_remediation.py build-context \
             --input remediation-input.json \
             --fix-plan socket-fix-plan.json \
+            --max-fixes ${{ inputs.max-fixes }} \
             --output remediation-context.json
           cp remediation-context.json triage-result.json
 
@@ -276,8 +282,9 @@ jobs:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
           set +e
+          FIX_IDS=$(jq -r '.fixes[].id' remediation-context.json | paste -sd, -)
           socket fix . \
-            --all \
+            --id "$FIX_IDS" \
             --no-major-updates \
             --json \
             --output-file socket-fix-apply.json

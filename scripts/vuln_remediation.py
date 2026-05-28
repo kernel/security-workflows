@@ -168,7 +168,7 @@ def fix_plan_state(plan_entry: dict[str, Any]) -> str:
     return str(plan_entry.get("type") or "")
 
 
-def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | None = None, max_fixes: int | None = None) -> dict[str, Any]:
     fix_plan = fix_plan or {}
     plan_by_id = fix_plan.get("fixDetails") or fix_plan.get("fixes") or {}
     default_plan_state = str(fix_plan.get("type") or "")
@@ -261,6 +261,13 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
                 "confirmation_method": "socket-post-plan",
             }
         )
+
+    if max_fixes is not None and max_fixes >= 0:
+        deferred.extend(
+            {**item, "decision": "defer", "reason": f"Deferred to keep this remediation PR limited to {max_fixes} fix(es)."}
+            for item in items[max_fixes:]
+        )
+        items = items[:max_fixes]
 
     return {"fixes": items, "deferred": deferred}
 
@@ -581,6 +588,7 @@ def main() -> int:
     context = sub.add_parser("build-context")
     context.add_argument("--input", required=True, type=Path)
     context.add_argument("--fix-plan", type=Path)
+    context.add_argument("--max-fixes", type=int)
     context.add_argument("--output", required=True, type=Path)
 
     validate = sub.add_parser("validate-diff")
@@ -611,7 +619,7 @@ def main() -> int:
         write_json(args.output, normalize_input(load_json(args.input, {})))
         return 0
     if args.command == "build-context":
-        write_json(args.output, build_context(load_json(args.input, {}), load_json(args.fix_plan, {}) if args.fix_plan else None))
+        write_json(args.output, build_context(load_json(args.input, {}), load_json(args.fix_plan, {}) if args.fix_plan else None, args.max_fixes))
         return 0
     if args.command == "validate-diff":
         result = validate_diff(args.repo_root, read_changed_files(args.repo_root, args.changed_files), load_json(args.context, {}) if args.context else {})
