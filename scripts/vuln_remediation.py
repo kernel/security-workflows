@@ -174,6 +174,7 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
     default_plan_state = str(fix_plan.get("type") or "")
     items: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
 
     for alert in remediation_input.get("alerts", []):
         vuln_id = alert.get("ghsa") or alert.get("cve")
@@ -196,10 +197,12 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
 
         if str(alert.get("dependency_scope") or "").lower() == "development":
             deferred.append({**alert, "decision": "defer", "reason": "Development-scope dependency is reported but not auto-fixed."})
+            seen_ids.add(vuln_id)
             continue
         reachability = str(alert.get("reachability") or "").lower()
         if reachability and reachability not in {"reachable", "potentially reachable", "potentially_reachable"}:
             deferred.append({**alert, "decision": "defer", "reason": f"Reachability is {alert.get('reachability')}; auto-remediation is limited to reachable or potentially reachable vulnerabilities."})
+            seen_ids.add(vuln_id)
             continue
 
         manifest = alert.get("manifest")
@@ -230,6 +233,32 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
                 "manifests": sorted(set(manifests)),
                 "socket_plan_state": state,
                 "allowed_direct_dependencies": responsible_direct_dependencies(plan_entry),
+                "confirmation_method": "socket-post-plan",
+            }
+        )
+        seen_ids.add(vuln_id)
+
+    for vuln_id, plan_entry in plan_by_id.items():
+        if vuln_id in seen_ids:
+            continue
+        state = fix_plan_state(plan_entry) or default_plan_state
+        if state not in {"fixFound", "partialFixFound", "only-direct-dependency-upgrades"}:
+            continue
+        direct_deps = responsible_direct_dependencies(plan_entry)
+        items.append(
+            {
+                "decision": "fix",
+                "id": vuln_id,
+                "cve": vuln_id if str(vuln_id).startswith("CVE-") else None,
+                "ghsa": vuln_id if str(vuln_id).startswith("GHSA-") else None,
+                "package": ", ".join(direct_deps) or vuln_id,
+                "ecosystem": None,
+                "old_version": version_from_plan(plan_entry),
+                "target_version": target_version_from_plan(plan_entry),
+                "manifests": [],
+                "socket_plan_state": state,
+                "allowed_direct_dependencies": direct_deps,
+                "confirmation_method": "socket-post-plan",
             }
         )
 
@@ -404,7 +433,27 @@ def validate_package_json_direct_deps(root: Path, path: str, allowed_direct_deps
     return errors
 
 
-def confirm_fix(root: Path, context: dict[str, Any]) -> dict[str, Any]:
+def fix_plan_ids(fix_plan: dict[str, Any] | None) -> set[str]:
+    if not fix_plan:
+        return set()
+    raw = fix_plan.get("fixDetails") or fix_plan.get("fixes") or {}
+    if isinstance(raw, dict):
+        return set(raw.keys())
+    return set()
+
+
+def confirm_fix(root: Path, context: dict[str, Any], post_fix_plan: dict[str, Any] | None = None) -> dict[str, Any]:
+    if post_fix_plan is not None:
+        remaining_ids = fix_plan_ids(post_fix_plan)
+        confirmed = []
+        failures = []
+        for fix in context.get("fixes", []):
+            if fix.get("id") in remaining_ids:
+                failures.append({"id": fix.get("id", ""), "reason": "Socket still reports a fix plan for this vulnerability after applying fixes."})
+            else:
+                confirmed.append({"id": fix.get("id", ""), "package": fix.get("package", ""), "old_version": fix.get("old_version") or "", "target_version": fix.get("target_version") or ""})
+        return {"ok": not failures, "confirmed": confirmed, "failures": failures}
+
     failures: list[dict[str, str]] = []
     confirmed: list[dict[str, str]] = []
     for fix in context.get("fixes", []):
@@ -543,6 +592,7 @@ def main() -> int:
     confirm = sub.add_parser("confirm")
     confirm.add_argument("--repo-root", type=Path, default=Path("."))
     confirm.add_argument("--context", required=True, type=Path)
+    confirm.add_argument("--post-fix-plan", type=Path)
     confirm.add_argument("--output", required=True, type=Path)
 
     pr_body = sub.add_parser("render-pr-body")
@@ -573,7 +623,7 @@ def main() -> int:
             return 1
         return 0
     if args.command == "confirm":
-        result = confirm_fix(args.repo_root, load_json(args.context, {}))
+        result = confirm_fix(args.repo_root, load_json(args.context, {}), load_json(args.post_fix_plan, {}) if args.post_fix_plan else None)
         write_json(args.output, result)
         return 0 if result.get("ok") else 1
     if args.command == "render-pr-body":
