@@ -151,6 +151,7 @@ jobs:
         run: |
           set +e
           socket fix . \
+            --all \
             --no-apply-fixes \
             --no-major-updates \
             --show-affected-direct-dependencies \
@@ -274,10 +275,9 @@ jobs:
           GOPRIVATE: github.com/kernel/*
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
-          FIX_IDS=$(jq -r '.fixes[].id' remediation-context.json | paste -sd, -)
           set +e
           socket fix . \
-            --id "$FIX_IDS" \
+            --all \
             --no-major-updates \
             --json \
             --output-file socket-fix-apply.json
@@ -310,6 +310,26 @@ jobs:
             --changed-files changed-files.txt \
             --output diff-validation.json
 
+      - name: Build post-fix Socket plan
+        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
+        run: |
+          set +e
+          socket fix . \
+            --all \
+            --no-apply-fixes \
+            --no-major-updates \
+            --show-affected-direct-dependencies \
+            --json \
+            --output-file post-fix-plan.json
+          POST_PLAN_EXIT=$?
+          set -e
+          if [ $POST_PLAN_EXIT -ne 0 ] || ! jq empty post-fix-plan.json 2>/dev/null; then
+            echo "::warning::Post-fix Socket planning failed; confirmation will fail closed."
+            echo '{"fixes":{"__post_fix_plan_failed__":{}}}' > post-fix-plan.json
+          fi
+
       - name: Confirm fixes
         if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
         run: |
@@ -317,6 +337,7 @@ jobs:
           python3 /tmp/vuln_remediation.py confirm \
             --repo-root . \
             --context remediation-context.json \
+            --post-fix-plan post-fix-plan.json \
             --output confirmation-result.json
           CONFIRM_EXIT=$?
           set -e
@@ -349,6 +370,7 @@ jobs:
             diff-validation.json
             changed-files.txt
             socket-fix-apply.json
+            post-fix-plan.json
           if-no-files-found: ignore
 
   pr:

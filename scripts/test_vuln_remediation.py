@@ -90,6 +90,25 @@ class NormalizeAndPolicyTests(unittest.TestCase):
         self.assertEqual(context["fixes"], [])
         self.assertEqual(context["deferred"][0]["reason"], "Socket did not return a fix plan for this vulnerability.")
 
+    def test_manager_uses_socket_plan_when_scan_alerts_lack_ids(self) -> None:
+        context = vr.build_context(
+            {"alerts": [{"type": "criticalCVE", "package": "google.golang.org/grpc", "version": "v1.79.1", "manifest": ["packages/api/go.mod"]}]},
+            {
+                "type": "only-direct-dependency-upgrades",
+                "fixes": {
+                    "GHSA-xxxx-yyyy-zzzz": {
+                        "directDependencies": [
+                            {"purl": "pkg:golang/google.golang.org/grpc@v1.79.1", "fixedVersion": "v1.81.1"}
+                        ]
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(context["fixes"][0]["id"], "GHSA-xxxx-yyyy-zzzz")
+        self.assertEqual(context["fixes"][0]["package"], "google.golang.org/grpc")
+        self.assertEqual(context["fixes"][0]["target_version"], "v1.81.1")
+
     def test_manager_focuses_on_reachable_and_potentially_reachable(self) -> None:
         fix_plan = {
             "type": "only-direct-dependency-upgrades",
@@ -215,6 +234,25 @@ class ConfirmationTests(RemediationFixture):
                     }
                 ]
             },
+        )
+
+        self.assertTrue(result["ok"], result)
+
+    def test_socket_post_plan_confirmation_fails_when_fix_still_planned(self) -> None:
+        result = vr.confirm_fix(
+            self.root,
+            {"fixes": [{"id": "GHSA-xxxx-yyyy-zzzz", "package": "google.golang.org/grpc"}]},
+            {"type": "only-direct-dependency-upgrades", "fixes": {"GHSA-xxxx-yyyy-zzzz": {}}},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("still reports a fix plan", result["failures"][0]["reason"])
+
+    def test_socket_post_plan_confirmation_succeeds_when_fix_disappears(self) -> None:
+        result = vr.confirm_fix(
+            self.root,
+            {"fixes": [{"id": "GHSA-xxxx-yyyy-zzzz", "package": "google.golang.org/grpc"}]},
+            {"type": "only-direct-dependency-upgrades", "fixes": {}},
         )
 
         self.assertTrue(result["ok"], result)
