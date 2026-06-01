@@ -550,18 +550,40 @@ def render_pr_body(triage: dict[str, Any], fix_result: dict[str, Any], confirmat
     if not fix_result.get("fixed"):
         lines.append("| (none) | | | | | | |")
 
+    deferred = triage.get("deferred") or fix_result.get("reverted") or []
+    unconfirmed = fix_result.get("reverted") or []
+    batch_limited = [
+        item for item in deferred
+        if "limited to" in str(item.get("reason") or "")
+    ]
+    other_deferred = [
+        item for item in deferred
+        if "limited to" not in str(item.get("reason") or "")
+    ]
     lines.extend([
         "",
-        "### Deferred / Rejected",
-        "| CVE/GHSA | Package | Reason |",
-        "|---|---|---|",
+        "### Not Included",
+        f"- Deferred by batch limit: {len(batch_limited)} advisories. They will be considered by future runs.",
+        f"- Other deferred scanner findings: {len(other_deferred)}.",
+        f"- Unconfirmed attempted fixes: {len(unconfirmed)}.",
     ])
-    deferred = triage.get("deferred") or fix_result.get("reverted") or []
-    for item in deferred:
-        vuln_id = item.get("ghsa") or item.get("cve") or item.get("id") or "Unavailable from detector"
-        lines.append(f"| {vuln_id} | {item.get('package','')} | {item.get('reason','')} |")
-    if not deferred:
-        lines.append("| (none) | | |")
+
+    if other_deferred or unconfirmed:
+        lines.extend([
+            "",
+            "<details>",
+            "<summary>Deferred details</summary>",
+            "",
+            "| CVE/GHSA | Package | Reason |",
+            "|---|---|---|",
+        ])
+        for item in (other_deferred + unconfirmed)[:10]:
+            vuln_id = item.get("ghsa") or item.get("cve") or item.get("id") or "Unavailable from detector"
+            lines.append(f"| {vuln_id} | {item.get('package','')} | {item.get('reason','')} |")
+        omitted = len(other_deferred) + len(unconfirmed) - 10
+        if omitted > 0:
+            lines.append(f"| ... | ... | {omitted} additional items omitted from PR body. See workflow artifacts for full details. |")
+        lines.extend(["", "</details>"])
     return "\n".join(lines) + "\n"
 
 
