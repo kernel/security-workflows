@@ -238,7 +238,7 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
         )
         seen_ids.add(vuln_id)
 
-    for vuln_id, plan_entry in plan_by_id.items():
+    for vuln_id, plan_entry in sorted_plan_entries(plan_by_id):
         if vuln_id in seen_ids:
             continue
         state = fix_plan_state(plan_entry) or default_plan_state
@@ -270,6 +270,37 @@ def build_context(remediation_input: dict[str, Any], fix_plan: dict[str, Any] | 
         items = items[:max_fixes]
 
     return {"fixes": items, "deferred": deferred}
+
+
+def sorted_plan_entries(plan_by_id: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    entries = [
+        (vuln_id, plan_entry)
+        for vuln_id, plan_entry in plan_by_id.items()
+        if isinstance(plan_entry, dict)
+    ]
+    return sorted(entries, key=lambda item: plan_complexity_score(item[0], item[1]))
+
+
+def plan_complexity_score(vuln_id: str, plan_entry: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    direct_dependencies = [
+        dependency
+        for dependency in plan_entry.get("directDependencies") or []
+        if isinstance(dependency, dict)
+    ]
+    direct_updates = sum(1 for dependency in direct_dependencies if dependency.get("fixedVersion"))
+    transitive_updates = sum(len(dependency.get("transitiveFixes") or []) for dependency in direct_dependencies)
+    package_count = len(responsible_direct_dependencies(plan_entry))
+
+    # Prefer the fixes Socket is most likely to apply cleanly:
+    # direct dependency bumps, fewer packages, fewer transitive edges.
+    direct_priority = 0 if direct_updates > 0 else 1
+    return (
+        direct_priority,
+        package_count or 999,
+        transitive_updates,
+        -direct_updates,
+        vuln_id,
+    )
 
 
 def responsible_direct_dependencies(plan_entry: dict[str, Any]) -> list[str]:
