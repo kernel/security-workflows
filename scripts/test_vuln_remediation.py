@@ -303,5 +303,25 @@ class ConfirmationTests(RemediationFixture):
         self.assertTrue(result["ok"], result)
 
 
+class PrBodyTests(unittest.TestCase):
+    def test_pr_body_summarizes_batch_limited_deferred_items(self) -> None:
+        body = vr.render_pr_body(
+            {
+                "deferred": [
+                    {"id": "GHSA-one", "package": "next", "reason": "Deferred to keep this remediation PR limited to 1 fix(es)."},
+                    {"id": "GHSA-two", "package": "next", "reason": "Deferred to keep this remediation PR limited to 1 fix(es)."},
+                    {"package": "entities", "reason": "Non-CVE alert is not handled by dependency remediation."},
+                ]
+            },
+            {"fixed": [{"id": "GHSA-fixed", "package": "next", "old_version": "1.0.0", "new_version": "1.0.1"}], "reverted": []},
+            {"confirmed": [{"id": "GHSA-fixed"}]},
+        )
+
+        self.assertIn("Deferred by batch limit: 2 advisories", body)
+        self.assertNotIn("| GHSA-one | next | Deferred to keep this remediation PR limited", body)
+        self.assertIn("<details>", body)
+        self.assertIn("entities", body)
+
+
 if __name__ == "__main__":
     unittest.main()
