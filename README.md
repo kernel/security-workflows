@@ -54,6 +54,24 @@ jobs:
     secrets: inherit
 ```
 
+## Enrollment
+
+Enroll repositories that process, store, transmit, or can materially affect production customer data or production operations. Examples include application services, data pipelines, infrastructure-as-code, deployment tooling, internal admin tools, and customer-facing dashboards.
+
+Enrollment supports these controls:
+
+1. **Testing**: pull requests run Kernel's shared Semgrep SAST workflow before merge.
+2. **Change review**: merges to `main` require human approval through the organization branch/ruleset protection policy.
+3. **Protected production changes**: repositories require branch protection before changes can land on the production branch.
+4. **Audit evidence**: enrolled repositories are visible in Vanta for auditor-facing evidence of security testing and change-management controls.
+
+When enrolling a repository:
+
+1. Add the repository to Vanta so it can provide auditor-facing evidence for the relevant security controls.
+2. Add Kernel security testing with the shared Semgrep workflow above. Example: [kernel/conductor#23](https://github.com/kernel/conductor/pull/23).
+3. Confirm merges to `main` require a human approval. This is handled by the [Kernel organization rulesets](https://github.com/organizations/kernel/settings/rules).
+4. Add a repo-level required status check for Semgrep. Require the `scan / scan` check to pass before merging so every pull request has a minimal security test gate. Repo rulesets are visible under Settings > Rules > Rulesets; example: [kernel/conductor Main Branch ruleset](https://github.com/kernel/conductor/rules/17187392).
+
 ## Per-repo config
 
 Each consumer repo should have a `socket.yml` at the root (Socket's native config):
