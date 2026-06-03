@@ -254,6 +254,42 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.setup-bun
         run: bun install
 
+      - name: Setup pnpm for Socket fixes
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          PNPM_VERSION=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          ignored = {"node_modules", ".git"}
+          for package_json in Path(".").rglob("package.json"):
+              if any(part in ignored for part in package_json.parts):
+                  continue
+              try:
+                  package_manager = json.loads(package_json.read_text()).get("packageManager", "")
+              except Exception:
+                  package_manager = ""
+              if package_manager.startswith("pnpm@"):
+                  print(package_manager.removeprefix("pnpm@"))
+                  break
+              if (package_json.parent / "pnpm-lock.yaml").exists():
+                  print("latest")
+                  break
+          else:
+              for lockfile in Path(".").rglob("pnpm-lock.yaml"):
+                  if not any(part in ignored for part in lockfile.parts):
+                      print("latest")
+                      break
+              else:
+                  print("")
+          PY
+          )
+          if [ -n "$PNPM_VERSION" ]; then
+            npm install -g "pnpm@${PNPM_VERSION}"
+          else
+            echo "No pnpm workspace detected."
+          fi
+
       - name: Setup Python
         if: steps.check.outputs.skip != 'true' && inputs.setup-python
         uses: actions/setup-python@v5
