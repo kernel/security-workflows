@@ -103,4 +103,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export CODEBASE_DESCRIPTION="${{ inputs.codebase-description }}"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --force --output-format=text
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --force --output-format=text
