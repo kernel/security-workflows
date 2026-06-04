@@ -92,15 +92,13 @@ jobs:
         with:
           name: semgrep-results
 
-      - name: Install Cursor CLI
-        run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
+      - name: Install Claude Code CLI
+        run: curl -fsSL https://claude.ai/install.sh | bash
 
       - name: Triage findings
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export CODEBASE_DESCRIPTION="${{ inputs.codebase-description }}"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --force --output-format=text
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose

@@ -87,7 +87,8 @@ projectIgnorePaths:
 
 Consumer repos need these secrets (set at org or repo level):
 
-- `CURSOR_API_KEY` — for the triage/fix agents
+- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Claude Code)
+- `CURSOR_API_KEY` — for the other fix/remediation agents (Cursor)
 - `ADMIN_APP_ID` + `ADMIN_APP_PRIVATE_KEY` — GitHub App for write access
 - `SOCKET_API_TOKEN` — Socket.dev API token
 
@@ -95,4 +96,5 @@ Consumer repos need these secrets (set at org or repo level):
 
 Consumer repos need these variables (set at org or repo level):
 
-- `CURSOR_PREFERRED_MODEL` — model for agent invocations
+- `CLAUDE_CODE_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent (Claude Code)
+- `CURSOR_PREFERRED_MODEL` — model for the other Cursor agent invocations
