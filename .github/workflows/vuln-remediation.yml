@@ -297,7 +297,7 @@ jobs:
 
           if git diff --quiet; then
             export DATE="$(date -u +%Y-%m-%d)"
-            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ secrets.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
           fi
 
       - name: Validate remediation diff
