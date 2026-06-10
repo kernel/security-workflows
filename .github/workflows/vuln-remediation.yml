@@ -270,6 +270,14 @@ jobs:
           curl https://cursor.com/install -fsS | bash
           echo "$HOME/.cursor/bin" >> $GITHUB_PATH
 
+      - name: Enable Cursor Max Mode
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          CFG_DIR="$HOME/.cursor"
+          mkdir -p "$CFG_DIR"
+          echo '{"maxMode": true}' > "$CFG_DIR/cli-config.json"
+          echo "CURSOR_CONFIG_DIR=$CFG_DIR" >> "$GITHUB_ENV"
+
       - name: Install Socket CLI
         if: steps.check.outputs.skip != 'true'
         run: npm install -g @socketsecurity/cli
