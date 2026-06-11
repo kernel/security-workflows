@@ -1,0 +1,89 @@
+name: Container Scan
+
+# Trivy-backed container image scanning for OS and application dependency CVEs.
+#
+# Uses aquasecurity/trivy-action directly because Socket Basics' pre-built
+# GitHub Action image temporarily ships without Trivy (as of v2.0.3).
+# When Socket re-enables container scanning in the Action, swap to:
+#   uses: SocketDev/socket-basics@v2.x.x
+#   with:
+#     container_images: <image>
+#     socket_security_api_key: ${{ secrets.SOCKET_API_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        description: Container image to scan (e.g. 613957054632.dkr.ecr.us-east-1.amazonaws.com/kernel/api@sha256:abc...)
+        type: string
+        required: true
+      severity:
+        description: Comma-separated severities to flag (CRITICAL,HIGH,MEDIUM,LOW)
+        type: string
+        required: false
+        default: 'CRITICAL,HIGH'
+      exit-code:
+        description: Exit code when vulnerabilities are found (1 to fail the build, 0 to observe only)
+        type: string
+        required: false
+        default: '0'
+      ignore-unfixed:
+        description: Skip CVEs with no available patch
+        type: boolean
+        required: false
+        default: true
+      aws-region:
+        description: AWS region for ECR login
+        type: string
+        required: false
+        default: 'us-east-1'
+      ecr-role-to-assume:
+        description: IAM role ARN to assume for ECR pull access
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.ecr-role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.ecr-role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Log in to ECR
+        if: inputs.ecr-role-to-assume != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Scan container image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          severity: ${{ inputs.severity }}
+          exit-code: ${{ inputs.exit-code }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+        if: always()
+
+      - name: Upload scan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-scan-report
+          path: trivy-results.sarif
+        if: always()
