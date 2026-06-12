@@ -47,10 +47,8 @@ jobs:
   scan:
     runs-on: ubuntu-24.04
     permissions:
-      actions: read
       contents: read
       id-token: write
-      security-events: write
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -66,25 +64,52 @@ jobs:
         if: inputs.ecr-role-to-assume != ''
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Scan container image
+      - name: Scan container image (table)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          severity: ${{ inputs.severity }}
+          exit-code: '0'
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          format: 'table'
+
+      - name: Scan container image (json)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ inputs.image-ref }}
           severity: ${{ inputs.severity }}
           exit-code: ${{ inputs.exit-code }}
           ignore-unfixed: ${{ inputs.ignore-unfixed }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          format: 'json'
+          output: 'trivy-results.json'
 
-      - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
+      - name: Write scan summary
         if: always()
+        shell: bash
+        run: |
+          if [ ! -f trivy-results.json ]; then
+            echo "No scan results produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-results.json)
+          MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-results.json)
+          LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-results.json)
+          {
+            echo "### Container Scan Results"
+            echo "**Image:** \`${{ inputs.image-ref }}\`"
+            echo ""
+            echo "| Severity | Count |"
+            echo "|----------|-------|"
+            echo "| Critical | $CRITICAL |"
+            echo "| High | $HIGH |"
+            echo "| Medium | $MEDIUM |"
+            echo "| Low | $LOW |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload scan artifact
         uses: actions/upload-artifact@v4
         with:
           name: container-scan-report
-          path: trivy-results.sarif
+          path: trivy-results.json
         if: always()
