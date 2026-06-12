@@ -1,0 +1,243 @@
+name: Container Vulnerability Remediation
+
+# Weekly scan of the production container image + LLM-powered triage and
+# automated remediation. Creates/updates an evergreen PR with dependency
+# bumps and base image updates.
+#
+# Modeled after vuln-remediation.yml (Socket SCA), but for container-level
+# findings (OS packages + compiled-in Go deps).
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        description: Production container image to scan (e.g. 613957054632.dkr.ecr.us-east-1.amazonaws.com/kernel/api:main)
+        type: string
+        required: true
+      go-version-file:
+        description: Path to go.mod for Go version detection (empty to skip Go fixes)
+        type: string
+        required: false
+        default: ''
+      aws-region:
+        description: AWS region for ECR login
+        type: string
+        required: false
+        default: 'us-east-1'
+      ecr-role-to-assume:
+        description: IAM role ARN to assume for ECR pull access
+        type: string
+        required: false
+        default: ''
+      security-workflows-ref:
+        description: Ref of kernel/security-workflows to fetch prompts from
+        type: string
+        required: false
+        default: main
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      has-findings: ${{ steps.check.outputs.has_findings }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.ecr-role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.ecr-role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Log in to ECR
+        if: inputs.ecr-role-to-assume != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Scan container image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          ignore-unfixed: true
+          format: 'json'
+          output: 'trivy-results.json'
+
+      - name: Check for findings
+        id: check
+        shell: bash
+        run: |
+          TOTAL=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-results.json)
+          echo "Total findings: $TOTAL"
+          if [ "$TOTAL" = "0" ]; then
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-scan-report
+          path: trivy-results.json
+
+  triage:
+    needs: scan
+    if: needs.scan.outputs.has-findings == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: container-scan-report
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Triage findings
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/triage-prompt.md" \
+            | envsubst '${GITHUB_REPOSITORY}' \
+            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+
+      - name: Upload triage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-triage-result
+          path: triage-result.json
+        if: always()
+
+  fix:
+    needs: triage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 10
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: container-scan-report
+
+      - name: Download triage results
+        uses: actions/download-artifact@v4
+        with:
+          name: container-triage-result
+        continue-on-error: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "kernel-internal[bot]"
+          git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+        env:
+          GOPRIVATE: github.com/kernel/*
+
+      - name: Reset remediation branch to main
+        run: git checkout -B security/container-remediation origin/main
+
+      - name: Setup Go
+        if: inputs.go-version-file != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+        env:
+          GOPRIVATE: github.com/kernel/*
+
+      - name: Install Cursor CLI
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
+
+      - name: Enable Cursor Max Mode
+        run: |
+          CFG_DIR="$HOME/.cursor"
+          mkdir -p "$CFG_DIR"
+          echo '{"maxMode": true}' > "$CFG_DIR/cli-config.json"
+          echo "CURSOR_CONFIG_DIR=$CFG_DIR" >> "$GITHUB_ENV"
+
+      - name: Apply fixes
+        timeout-minutes: 8
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GOPRIVATE: github.com/kernel/*
+        run: |
+          export DATE="$(date -u +%Y-%m-%d)"
+          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/fix-prompt.md" \
+            | envsubst '${GITHUB_REPOSITORY} ${DATE}' \
+            | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.diff.outputs.has_changes == 'true'
+        run: |
+          git add -A
+          git commit -m "security: container vulnerability remediation ($(date -u +%Y-%m-%d))"
+          git push --force-with-lease origin security/container-remediation
+
+      - name: Create or update PR
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head security/container-remediation --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          BODY="## Container Vulnerability Remediation
+
+          Automated fixes for container image vulnerabilities detected by Trivy.
+
+          **Image:** \`${{ inputs.image-ref }}\`
+          **Date:** $(date -u +%Y-%m-%d)
+
+          See workflow run for scan results and triage details."
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            gh pr edit "$EXISTING_PR" --repo "$REPO" --body "$BODY" --add-assignee ulziibay-kernel --add-reviewer ulziibay-kernel
+            echo "Updated PR #${EXISTING_PR}"
+          else
+            gh pr create \
+              --repo "$REPO" \
+              --head security/container-remediation \
+              --base main \
+              --title "security: container vulnerability remediation" \
+              --assignee ulziibay-kernel \
+              --reviewer ulziibay-kernel \
+              --body "$BODY"
+          fi
