@@ -1,37 +1,24 @@
 name: Container Scan
 
-# Trivy-backed container image scanning for OS and application dependency CVEs.
+# Socket Basics container image scanning. Results flow to Socket Dashboard.
 #
-# Uses aquasecurity/trivy-action directly because Socket Basics' pre-built
-# GitHub Action image temporarily ships without Trivy (as of v2.0.3).
-# When Socket re-enables container scanning in the Action, swap to:
-#   uses: SocketDev/socket-basics@v2.x.x
-#   with:
-#     container_images: <image>
-#     socket_security_api_key: ${{ secrets.SOCKET_API_TOKEN }}
+# Socket Basics bundles Trivy for container scanning. If container scanning
+# is temporarily unavailable in their pre-built action, the scan step will
+# report the issue and we can fall back to standalone Trivy.
 
 on:
   workflow_call:
     inputs:
-      image-ref:
-        description: Container image to scan (e.g. 613957054632.dkr.ecr.us-east-1.amazonaws.com/kernel/api@sha256:abc...)
-        type: string
-        required: true
-      severity:
-        description: Comma-separated severities to flag (CRITICAL,HIGH,MEDIUM,LOW)
+      container-images:
+        description: Comma-separated list of container images to scan (e.g. 613957054632.dkr.ecr.us-east-1.amazonaws.com/kernel/api:sha-abc1234)
         type: string
         required: false
-        default: 'CRITICAL,HIGH'
-      exit-code:
-        description: Exit code when vulnerabilities are found (1 to fail the build, 0 to observe only)
+        default: ''
+      dockerfiles:
+        description: Comma-separated list of Dockerfiles to scan (e.g. packages/api/Dockerfile). Auto-detected if omitted.
         type: string
         required: false
-        default: '0'
-      ignore-unfixed:
-        description: Skip CVEs with no available patch
-        type: boolean
-        required: false
-        default: true
+        default: ''
       aws-region:
         description: AWS region for ECR login
         type: string
@@ -49,6 +36,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      pull-requests: write
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -64,52 +52,11 @@ jobs:
         if: inputs.ecr-role-to-assume != ''
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Scan container image (table)
-        uses: aquasecurity/trivy-action@master
+      - name: Run Socket Basics
+        uses: SocketDev/socket-basics@v2.0.3
         with:
-          image-ref: ${{ inputs.image-ref }}
-          severity: ${{ inputs.severity }}
-          exit-code: '0'
-          ignore-unfixed: ${{ inputs.ignore-unfixed }}
-          format: 'table'
-
-      - name: Scan container image (json)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ inputs.image-ref }}
-          severity: ${{ inputs.severity }}
-          exit-code: ${{ inputs.exit-code }}
-          ignore-unfixed: ${{ inputs.ignore-unfixed }}
-          format: 'json'
-          output: 'trivy-results.json'
-
-      - name: Write scan summary
-        if: always()
-        shell: bash
-        run: |
-          if [ ! -f trivy-results.json ]; then
-            echo "No scan results produced." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-results.json)
-          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-results.json)
-          MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-results.json)
-          LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-results.json)
-          {
-            echo "### Container Scan Results"
-            echo "**Image:** \`${{ inputs.image-ref }}\`"
-            echo ""
-            echo "| Severity | Count |"
-            echo "|----------|-------|"
-            echo "| Critical | $CRITICAL |"
-            echo "| High | $HIGH |"
-            echo "| Medium | $MEDIUM |"
-            echo "| Low | $LOW |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload scan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: container-scan-report
-          path: trivy-results.json
-        if: always()
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          socket_security_api_key: ${{ secrets.SOCKET_API_TOKEN }}
+          container_images: ${{ inputs.container-images }}
+          dockerfiles: ${{ inputs.dockerfiles }}
+          socket_org: kernel
