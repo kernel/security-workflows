@@ -2,6 +2,7 @@ name: Container Scan
 
 # Trivy container image scanning for OS and application dependency CVEs.
 # Results output as table in logs + JSON artifact for audit evidence.
+# LLM-powered triage posts actionable remediation to the PR.
 
 on:
   workflow_call:
@@ -35,6 +36,11 @@ on:
         type: string
         required: false
         default: ''
+      security-workflows-ref:
+        description: Ref of kernel/security-workflows to fetch the triage prompt from
+        type: string
+        required: false
+        default: main
 
 jobs:
   scan:
@@ -43,6 +49,8 @@ jobs:
       contents: read
       id-token: write
     timeout-minutes: 15
+    outputs:
+      has-findings: ${{ steps.check.outputs.has_findings }}
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +84,21 @@ jobs:
           format: 'json'
           output: 'trivy-results.json'
 
+      - name: Check for findings
+        id: check
+        shell: bash
+        run: |
+          if [ ! -f trivy-results.json ]; then
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TOTAL=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-results.json)
+          if [ "$TOTAL" = "0" ]; then
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Write scan summary
         if: always()
         shell: bash
@@ -106,3 +129,33 @@ jobs:
           name: container-scan-report
           path: trivy-results.json
         if: always()
+
+  triage:
+    needs: scan
+    if: needs.scan.outputs.has-findings == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: container-scan-report
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Triage findings
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/triage-prompt.md" \
+            | envsubst '${GITHUB_REPOSITORY}' \
+            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
