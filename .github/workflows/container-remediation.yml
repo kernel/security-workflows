@@ -172,22 +172,15 @@ jobs:
         env:
           GOPRIVATE: github.com/kernel/*
 
-      - name: Install Cursor CLI
+      - name: Install Claude Code CLI
         run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
-
-      - name: Enable Cursor Max Mode
-        run: |
-          CFG_DIR="$HOME/.cursor"
-          mkdir -p "$CFG_DIR"
-          echo '{"maxMode": true}' > "$CFG_DIR/cli-config.json"
-          echo "CURSOR_CONFIG_DIR=$CFG_DIR" >> "$GITHUB_ENV"
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Apply fixes
         timeout-minutes: 8
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOPRIVATE: github.com/kernel/*
           GO_MODULE_DIR: ${{ inputs.go-version-file != '' && format('{0}', inputs.go-version-file) || '.' }}
         run: |
@@ -195,7 +188,7 @@ jobs:
           export GO_MODULE_DIR="$(dirname "$GO_MODULE_DIR")"
           curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/fix-prompt.md" \
             | envsubst '${GITHUB_REPOSITORY} ${DATE} ${GO_MODULE_DIR}' \
-            | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
 
       - name: Check for changes
         id: diff
