@@ -189,10 +189,12 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GOPRIVATE: github.com/kernel/*
+          GO_MODULE_DIR: ${{ inputs.go-version-file != '' && format('{0}', inputs.go-version-file) || '.' }}
         run: |
           export DATE="$(date -u +%Y-%m-%d)"
+          export GO_MODULE_DIR="$(dirname "$GO_MODULE_DIR")"
           curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/fix-prompt.md" \
-            | envsubst '${GITHUB_REPOSITORY} ${DATE}' \
+            | envsubst '${GITHUB_REPOSITORY} ${DATE} ${GO_MODULE_DIR}' \
             | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
 
       - name: Check for changes

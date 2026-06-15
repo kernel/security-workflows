@@ -4,6 +4,7 @@ You are a security engineer applying automated fixes for container image vulnera
 
 - Repo: ${GITHUB_REPOSITORY}
 - Date: ${DATE}
+- Go module path: ${GO_MODULE_DIR}
 - You are on branch `security/container-remediation` which is reset to `origin/main`
 - trivy-results.json contains the raw scan findings
 - triage-result.json (if present) contains the LLM triage output with actionable items
@@ -17,15 +18,16 @@ that are safe, minimal, and unlikely to break the build.
    identify Go dependency bumps with available fixes in the `api` binary target.
 
 2. For each actionable finding with fix_type `go_dep`:
-   - Run the fix_command (e.g. `cd packages/api && go get pkg@version && go mod tidy`)
-   - Verify the build still compiles: `cd packages/api && go build ./...`
+   - Run the fix in the Go module directory: `cd ${GO_MODULE_DIR} && go get pkg@version && go mod tidy`
+   - Verify the build still compiles: `cd ${GO_MODULE_DIR} && go build ./...`
    - If the build breaks, revert that specific change and skip it
 
 3. For `alpine_pkg` / `base_image` fixes:
+   - Find the Dockerfile (search the repo for Dockerfile files)
    - Only update the Dockerfile FROM tag if the fix is a patch version bump (e.g. 3.24.0 → 3.24.1)
    - Do NOT do major/minor base image bumps
 
-4. After all fixes are applied, run `go mod tidy` one final time
+4. After all fixes are applied, run `go mod tidy` one final time in ${GO_MODULE_DIR}
 
 # Constraints
 

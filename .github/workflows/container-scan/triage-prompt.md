@@ -63,7 +63,7 @@ Classify as **actionable**:
 
 # Fix Type Classification
 
-- `go_dep`: Go module dependency bump. Fix command: `cd packages/api && go get <pkg>@<version> && go mod tidy`
+- `go_dep`: Go module dependency bump. Fix command: `go get <pkg>@<version> && go mod tidy` (the workflow handles the correct directory)
 - `alpine_pkg`: Alpine apk package. Fix command: rebuild image (new base image picks up patched packages)
 - `base_image`: Base image update needed. Fix command: update FROM tag in Dockerfile
 

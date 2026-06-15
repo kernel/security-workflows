@@ -6,7 +6,7 @@ on:
       image-ref:
         description: Container image to scan
         required: true
-        default: '613957054632.dkr.ecr.us-east-1.amazonaws.com/kernel/api:main'
+        default: 'ghcr.io/kernel/api:main'
 
 permissions:
   contents: write
@@ -18,5 +18,5 @@ jobs:
     uses: ./.github/workflows/container-remediation.yml
     with:
       image-ref: ${{ inputs.image-ref }}
-      go-version-file: ''
+      go-version-file: 'test/container-remediation/go.mod'
     secrets: inherit
