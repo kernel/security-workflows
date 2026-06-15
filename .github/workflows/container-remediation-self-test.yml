@@ -19,5 +19,4 @@ jobs:
     with:
       image-ref: ${{ inputs.image-ref }}
       go-version-file: ''
-      ecr-role-to-assume: 'arn:aws:iam::613957054632:role/github-actions-ecr-pusher'
     secrets: inherit
