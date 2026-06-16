@@ -36,4 +36,6 @@ that are safe, minimal, and unlikely to break the build.
 - Do NOT add comments explaining what you changed
 - If no fixes can be safely applied, exit cleanly with no changes
 - Do NOT commit — the workflow handles committing
-- Maximum 5 dependency bumps per run to limit blast radius
+- Apply ALL actionable fixes from the triage (no artificial limit)
+- Group fixes by priority: apply all P0 fixes first, then P1, then P2
+- If any P0 fix breaks the build, stop and report — do not continue to P1/P2

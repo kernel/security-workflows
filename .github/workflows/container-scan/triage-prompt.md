@@ -101,4 +101,4 @@ Classify as **actionable**:
 - Write the file to the current working directory as `triage-result.json`
 - Sort actionable items by priority (P0 first, then P1, then P2)
 - Group related CVEs (same package, same fix) into a single actionable entry
-- Maximum 10 actionable items per run — if more exist, keep the highest priority ones
+- Include ALL actionable items (no cap) — the fix agent handles prioritization
