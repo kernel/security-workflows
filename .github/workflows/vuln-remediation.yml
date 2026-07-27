@@ -264,19 +264,9 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.setup-python
         run: pip install uv
 
-      - name: Install Cursor CLI
+      - name: Install Codex CLI
         if: steps.check.outputs.skip != 'true'
-        run: |
-          curl https://cursor.com/install -fsS | bash
-          echo "$HOME/.cursor/bin" >> $GITHUB_PATH
-
-      - name: Enable Cursor Max Mode
-        if: steps.check.outputs.skip != 'true'
-        run: |
-          CFG_DIR="$HOME/.cursor"
-          mkdir -p "$CFG_DIR"
-          echo '{"maxMode": true}' > "$CFG_DIR/cli-config.json"
-          echo "CURSOR_CONFIG_DIR=$CFG_DIR" >> "$GITHUB_ENV"
+        run: npm install -g @openai/codex
 
       - name: Install Socket CLI
         if: steps.check.outputs.skip != 'true'
@@ -286,7 +276,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         timeout-minutes: 10
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOPRIVATE: github.com/kernel/*
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
@@ -305,7 +295,7 @@ jobs:
 
           if git diff --quiet; then
             export DATE="$(date -u +%Y-%m-%d)"
-            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | agent -p --model ${{ vars.CURSOR_PREFERRED_MODEL }} --workspace . --trust --force --output-format=text
+            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/vuln-remediation/fix-prompt.md | envsubst '${GITHUB_REPOSITORY} ${DATE}' | codex exec --model gpt-5.5 --dangerously-bypass-approvals-and-sandbox --ephemeral -
           fi
 
       - name: Validate remediation diff
