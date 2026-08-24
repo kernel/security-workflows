@@ -92,15 +92,13 @@ jobs:
         with:
           name: semgrep-results
 
-      - name: Install Claude Code CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
 
       - name: Triage findings
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export CODEBASE_DESCRIPTION="${{ inputs.codebase-description }}"
-          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+          curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/.github/workflows/semgrep-triage-prompt.md | envsubst '${GITHUB_REPOSITORY} ${CODEBASE_DESCRIPTION}' | codex exec --model gpt-5.5 --dangerously-bypass-approvals-and-sandbox --ephemeral -
