@@ -1,0 +1,189 @@
+name: Breakglass Merge
+
+# Merges one named pull request without its required approval, and records why on the PR.
+#
+# Called by the thin `Breakglass` workflow each in-scope repo installs, which fires on a
+# `/breakglass <reason>` comment.
+#
+# It lives here rather than in kernel/infra because kernel/infra is private, and a public
+# repository cannot call a reusable workflow stored in a private one -- the run is created and
+# then fails with no job, no log and nothing on the pull request. Four of the in-scope repos
+# are public, so hosting it in a public repo is what makes one caller work everywhere. Nothing
+# here is secret: the credentials arrive as inputs, and the logic is visible in run logs on any
+# public repo anyway. The PR is wherever the comment was left and the requester is
+# whoever left it -- `github.actor` on an issue_comment is the comment's author, authenticated
+# by GitHub. Nothing is passed in and nothing has to be trusted.
+#
+# The breakglass App is the approval ruleset's bypass actor at `pull_request` mode, so it can
+# merge a pull request past a missing approval and cannot push outside one. Nobody is granted
+# anything: there is no elevated role to expire, so no state to keep and nothing to reconcile.
+# An emergency spanning several PRs is one comment per PR.
+#
+# There is no workflow_dispatch entry point. issue_comment always runs the workflow file from
+# the default branch, so unlike a dispatch there is no way to run a modified copy of this from
+# a branch with the real credential.
+
+on:
+  workflow_call:
+    # Named rather than inherited: this is called across repositories, so `secrets: inherit`
+    # would hand the callee every secret the caller holds. It needs exactly these two.
+    secrets:
+      BREAKGLASS_APP_ID:
+        required: true
+      BREAKGLASS_APP_PRIVATE_KEY:
+        required: true
+
+env:
+  BREAKGLASS_ORG: kernel
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Generate app token
+        id: app-token
+        # Pinned to a commit: this step is handed the app's private key, so a mutable tag
+        # would let whoever controls it run their own code with that key. d72941d is v1.12.0,
+        # the commit `v1` already resolved to, so pinning changed no behaviour.
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.BREAKGLASS_APP_ID }}
+          private-key: ${{ secrets.BREAKGLASS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Deliberately NOT scoped with `repositories:`. Scoping the installation token to
+          # the single repo holding the PR is tighter and was the right instinct, but it is
+          # also the only functional difference between the configuration that provably
+          # merged a PR past an approval rule and every configuration since, which has been
+          # refused. Until that is understood, the token stays owner-wide. Narrowing it again
+          # needs a test that shows the merge still works.
+
+      - name: Merge without approval
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.comment.body }}
+          REQUESTER_ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          set -euo pipefail
+
+          # Two kinds of no. `refuse` explains itself on the PR, because a request from
+          # someone entitled to make one must never fail silently -- silence during an
+          # incident reads as "it worked". `deny` says nothing at all: on a public repo anyone
+          # can comment, and replying to them would both spam the PR and tell an attacker
+          # exactly where the gate is.
+          refuse() { echo "$1" > refusal.txt; echo "::error::$1"; exit 1; }
+          deny() { touch .silent; echo "::error::denied: $1"; exit 1; }
+
+          # Who is asking. author_association comes from the event payload, so this costs no
+          # API call and needs no permission on the app -- OWNER and MEMBER both mean a member
+          # of the org that owns the repo. Everything else, including CONTRIBUTOR (someone with
+          # merged commits but no access), is a stranger as far as this is concerned.
+          # The caller's `if:` matches the prefix, which also matches `/breakglass-anything`.
+          # Require whitespace or end-of-line after the command so a different command that
+          # happens to share the prefix is not treated as this one -- and say nothing, because
+          # it was never addressed to us.
+          first="$(printf '%s' "$BODY" | head -1)"
+          rest="${first#/breakglass}"
+          case "$rest" in
+            "" | " "* | "	"* | $'\r'*) ;;
+            *) echo "not a breakglass command: $first"; exit 0 ;;
+          esac
+
+          case "$REQUESTER_ASSOCIATION" in
+            OWNER|MEMBER) ;;
+            *) deny "@$ACTOR is $REQUESTER_ASSOCIATION, not an org member" ;;
+          esac
+
+          pr="$(gh api "/repos/$REPO/pulls/$NUMBER")"
+
+          if [ "$(echo "$pr" | jq -r .state)" != "open" ]; then
+            refuse "This PR is already closed."
+          fi
+
+          # Whose code. The check above is on who *asked*, not on what gets merged, so without
+          # this an org member could breakglass a stranger's fork PR -- which on a public repo
+          # means merging arbitrary external code into the default branch with no review. A
+          # fork PR is never the emergency: the emergency is our own change that cannot wait.
+          if [ "$(echo "$pr" | jq -r .head.repo.full_name)" != "$REPO" ]; then
+            refuse "This PR comes from a fork. Breakglass only merges branches in \`$REPO\` — push the fix as a branch here and try again."
+          fi
+
+          case "$(echo "$pr" | jq -r .author_association)" in
+            OWNER|MEMBER) ;;
+            *) refuse "This PR was opened by someone outside the org. Breakglass is for our own changes that cannot wait for a review, not for merging a contribution unreviewed." ;;
+          esac
+
+          reason="$(printf '%s' "$rest" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+          if [ "${#reason}" -lt 10 ]; then
+            refuse "Give a reason of at least 10 characters: \`/breakglass prod-jfk-unikraft-9 wedged, api 5xx\`. Whoever reads this commit later has only what you type here."
+          fi
+
+          # Recorded before the merge, never after: a merge whose justification failed to post
+          # is exactly the unexplained merge this exists to prevent. Worded as a request rather
+          # than an accomplished merge, because at this point it has not happened yet and may
+          # still be refused -- in which case this comment is followed by one saying so.
+          gh api -X POST "/repos/$REPO/issues/$NUMBER/comments" \
+            -f body="🔓 **Breakglass merge requested by @$ACTOR**
+
+          **Reason:** $reason
+
+          Merging without the required approval. Please review after the fact." >/dev/null
+
+          # Merge with a method the repo actually allows. Guessing costs a 405 during an
+          # incident, which is the moment least able to absorb one.
+          repo_info="$(gh api "/repos/$REPO")"
+          for method in squash merge rebase; do
+            case "$method" in
+              squash) allowed="$(echo "$repo_info" | jq -r .allow_squash_merge)" ;;
+              merge)  allowed="$(echo "$repo_info" | jq -r .allow_merge_commit)" ;;
+              rebase) allowed="$(echo "$repo_info" | jq -r .allow_rebase_merge)" ;;
+            esac
+            [ "$allowed" = "true" ] && break
+          done
+
+          # Merge the exact commit the checks above were run against. Everything validated so
+          # far -- the fork check especially -- describes this head and nothing later; without
+          # pinning it, a push landing between validation and merge would be merged unreviewed
+          # on the strength of a decision made about different code. A moved head 409s here.
+          head="$(echo "$pr" | jq -r .head.sha)"
+          if ! gh api -X PUT "/repos/$REPO/pulls/$NUMBER/merge" \
+              -f merge_method="$method" -f sha="$head" >/dev/null 2>merge-error.txt; then
+            refuse "Could not merge: $(tr -d '\n' < merge-error.txt). The reason above is recorded; fix the PR and comment again."
+          fi
+
+          {
+            echo "### Breakglass merge"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Requester | @$ACTOR |"
+            echo "| PR | $REPO#$NUMBER |"
+            echo "| Reason | $reason |"
+            echo "| Method | $method |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Explain the refusal
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Denied requests get no reply at all -- see `deny` in the previous step.
+          if [ -f .silent ]; then
+            exit 0
+          fi
+
+          if [ -f refusal.txt ]; then
+            body="⚠️ **Breakglass did not merge.** $(cat refusal.txt)"
+          else
+            body="⚠️ **Breakglass failed** for a reason it could not explain here — see [the run]($RUN_URL). Nothing was merged."
+          fi
+
+          gh api -X POST "/repos/$REPO/issues/$NUMBER/comments" -f body="$body" >/dev/null
