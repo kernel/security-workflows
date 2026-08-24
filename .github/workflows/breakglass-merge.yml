@@ -51,12 +51,9 @@ jobs:
           app-id: ${{ secrets.BREAKGLASS_APP_ID }}
           private-key: ${{ secrets.BREAKGLASS_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          # Deliberately NOT scoped with `repositories:`. Scoping the installation token to
-          # the single repo holding the PR is tighter and was the right instinct, but it is
-          # also the only functional difference between the configuration that provably
-          # merged a PR past an approval rule and every configuration since, which has been
-          # refused. Until that is understood, the token stays owner-wide. Narrowing it again
-          # needs a test that shows the merge still works.
+          # Scoped to the one repo holding the PR. Without this the token reaches every repo
+          # the app is installed on, which is far more than merging this PR requires.
+          repositories: ${{ github.event.repository.name }}
 
       - name: Merge without approval
         env:
