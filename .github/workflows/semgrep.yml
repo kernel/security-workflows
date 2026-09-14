@@ -17,6 +17,7 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container:
       image: semgrep/semgrep
     outputs:
@@ -81,6 +82,7 @@ jobs:
 
   triage:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: scan
     if: needs.scan.outputs.findings_count != '0' && fromJson(needs.scan.outputs.findings_count) <= 20
     steps:
