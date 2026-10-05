@@ -17,7 +17,7 @@ name: Breakglass Merge
 # The breakglass App is the approval ruleset's bypass actor at `pull_request` mode, so it can
 # merge a pull request past a missing approval and cannot push outside one. Nobody is granted
 # anything: there is no elevated role to expire, so no state to keep and nothing to reconcile.
-# An emergency spanning several PRs is one comment per PR.
+# `/breakglass --stack <reason>` on the bottom PR merges its linear stack upward.
 #
 # There is no workflow_dispatch entry point. issue_comment always runs the workflow file from
 # the default branch, so unlike a dispatch there is no way to run a modified copy of this from
@@ -114,8 +114,128 @@ jobs:
           esac
 
           reason="$(printf '%s' "$rest" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+          stack=false
+          case "$reason" in
+            --stack | --stack\ *)
+              stack=true
+              reason="${reason#--stack}"
+              reason="${reason# }"
+              ;;
+          esac
           if [ "${#reason}" -lt 10 ]; then
             refuse "Give a reason of at least 10 characters: \`/breakglass prod-jfk-unikraft-9 wedged, api 5xx\`. Whoever reads this commit later has only what you type here."
+          fi
+
+          if [ "$stack" = true ]; then
+            export REASON="$reason"
+            # Inline so the app credential never runs code checked out from the caller's PR.
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          repo = os.environ["REPO"]
+          root = int(os.environ["NUMBER"])
+          actor = os.environ["ACTOR"]
+          reason = os.environ["REASON"]
+          prefix = f"/repos/{repo}"
+          merged = []
+
+          def api(endpoint, method="GET", data=None, paginate=False):
+              args = ["gh", "api", prefix + endpoint, "-X", method]
+              if paginate:
+                  args += ["--paginate", "--slurp"]
+              if data is not None:
+                  args += ["--input", "-"]
+              result = subprocess.run(
+                  args, input=json.dumps(data) if data is not None else None,
+                  text=True, capture_output=True, check=True,
+              )
+              return json.loads(result.stdout)
+
+          def validate(pr):
+              number = pr["number"]
+              if pr["state"] != "open" or pr["draft"]:
+                  raise ValueError(f"PR #{number} must be open and ready for review.")
+              if (pr["head"]["repo"] or {}).get("full_name") != repo:
+                  raise ValueError(f"PR #{number} comes from a fork or deleted repository.")
+              if pr["author_association"] not in ("OWNER", "MEMBER"):
+                  raise ValueError(f"PR #{number} was opened by someone outside the org.")
+
+          def unchanged(pr, expected, base):
+              validate(pr)
+              if (pr["head"]["sha"] != expected["head"]["sha"]
+                      or pr["head"]["ref"] != expected["head"]["ref"]
+                      or pr["base"]["ref"] != base):
+                  raise ValueError(f"PR #{pr['number']} changed after stack validation. Comment again to validate the new stack.")
+
+          try:
+              repo_info = api("")
+              target = repo_info["default_branch"]
+              if not repo_info["allow_merge_commit"]:
+                  raise ValueError("Stack merges require merge commits to be enabled so dependent PRs keep their ancestry.")
+              first = api(f"/pulls/{root}")
+              if first["base"]["ref"] != target:
+                  raise ValueError(f"Start on the bottom PR targeting `{target}`.")
+
+              # A fixed plan: never follow new dependents discovered after merging begins.
+              pages = api("/pulls?state=open&per_page=100", paginate=True)
+              open_prs = [pr for page in pages for pr in page]
+              plan = []
+              current = first
+              branches = {target}
+              while True:
+                  validate(current)
+                  head = current["head"]["ref"]
+                  if head in branches:
+                      raise ValueError("The stack has a cycle or duplicate head branch.")
+                  branches.add(head)
+                  plan.append(current)
+                  children = [pr for pr in open_prs if pr["base"]["ref"] == head]
+                  if len(children) > 1:
+                      numbers = ", ".join(f"#{pr['number']}" for pr in children)
+                      raise ValueError(f"The stack branches after #{current['number']}: {numbers}. Merge those PRs individually.")
+                  if not children:
+                      break
+                  current = children[0]
+
+              order = " → ".join(f"#{pr['number']}" for pr in plan)
+              for expected in plan:
+                  number = expected["number"]
+                  current = api(f"/pulls/{number}")
+                  # GitHub may retarget dependents itself when a merged branch is deleted.
+                  base = target if merged and current["base"]["ref"] == target else expected["base"]["ref"]
+                  unchanged(current, expected, base)
+                  # Audit before either retargeting or merging this PR.
+                  api(f"/issues/{number}/comments", "POST", {"body": (
+                      f"🔓 **Breakglass merge requested by @{actor}**\n\n"
+                      f"**Reason:** {reason}\n\n"
+                      f"**Stack:** {order}, starting at #{root}, targeting `{target}`.\n\n"
+                      "Merging without the required approval. Please review after the fact."
+                  )})
+                  if current["base"]["ref"] != target:
+                      # Only retarget after the previous merge preserved the shared commits.
+                      api(f"/pulls/{number}", "PATCH", {"base": target})
+                  current = api(f"/pulls/{number}")
+                  unchanged(current, expected, target)
+                  result = api(f"/pulls/{number}/merge", "PUT", {
+                      "merge_method": "merge", "sha": expected["head"]["sha"],
+                  })
+                  if not result.get("merged"):
+                      raise ValueError(f"PR #{number} did not merge: {result.get('message', 'unknown error')}")
+                  merged.append(number)
+                  Path("merged.txt").write_text(", ".join(f"#{n}" for n in merged))
+
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(f"### Breakglass stack merge\n\n{order} → `{target}`\n\nRequester: @{actor}\n\nReason: {reason}\n")
+          except (ValueError, subprocess.CalledProcessError) as error:
+              detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+              progress = f"Already merged: {', '.join(f'#{n}' for n in merged)}." if merged else "Nothing was merged."
+              Path("refusal.txt").write_text(f"Stack stopped: {detail} {progress} Remaining PRs were not merged; a retargeted PR may now target the default branch.")
+              raise SystemExit(1)
+          PY
+            exit 0
           fi
 
           # Recorded before the merge, never after: a merge whose justification failed to post
@@ -179,8 +299,15 @@ jobs:
 
           if [ -f refusal.txt ]; then
             body="⚠️ **Breakglass did not merge.** $(cat refusal.txt)"
+            if [ -f merged.txt ]; then
+              body="⚠️ **Breakglass stack stopped.** $(cat refusal.txt)"
+            fi
           else
-            body="⚠️ **Breakglass failed** for a reason it could not explain here — see [the run]($RUN_URL). Nothing was merged."
+            progress="Nothing was merged."
+            if [ -f merged.txt ]; then
+              progress="Already merged: $(cat merged.txt). Remaining PRs were not merged."
+            fi
+            body="⚠️ **Breakglass failed** for a reason it could not explain here — see [the run]($RUN_URL). $progress"
           fi
 
           gh api -X POST "/repos/$REPO/issues/$NUMBER/comments" -f body="$body" >/dev/null

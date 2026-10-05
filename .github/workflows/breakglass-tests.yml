@@ -1,0 +1,27 @@
+name: Breakglass Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/breakglass-merge.yml
+      - .github/workflows/breakglass-tests.yml
+      - scripts/test_breakglass.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/breakglass-merge.yml
+      - .github/workflows/breakglass-tests.yml
+      - scripts/test_breakglass.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: |
+          python3 -m venv /tmp/breakglass-tests
+          /tmp/breakglass-tests/bin/pip install PyYAML==6.0.3
+          /tmp/breakglass-tests/bin/python -m unittest discover -s scripts -p test_breakglass.py

@@ -4,6 +4,40 @@ Reusable GitHub Actions workflows for vulnerability scanning and remediation acr
 
 ## Workflows
 
+### `breakglass-merge.yml`
+
+Merges an emergency PR without its required approval when an org member comments
+`/breakglass <reason>`. The reason must contain at least 10 characters and is recorded
+on the PR before merging. The GitHub App token is scoped to the calling repository;
+the workflow never checks out PR code.
+
+To merge a linear PR stack, comment on its **bottom PR**, targeting the repository's
+default branch:
+
+```
+/breakglass --stack emergency fix spans these dependent PRs
+```
+
+Stack mode follows open PRs whose base branch is the preceding PR's head branch. It
+validates the entire discovered stack before starting, then merges from bottom to
+top into the default branch, retargeting each dependent PR after its parent merges.
+Every PR gets the requester, reason, and stack order recorded before its merge.
+
+Merge commits must be enabled: stack mode uses them to preserve the commits shared
+with dependent branches. The ordinary single-PR command still prefers squash merging.
+Stacks containing forks, non-member authors, drafts, cycles, or multiple dependents
+on one branch are refused. A changed head or base, a merge conflict, or an API error
+stops the operation and reports which PRs already merged. Merges are not rolled back;
+a retargeted PR can remain pointed at the default branch. Resume from the first
+remaining PR targeting the default branch after resolving the failure.
+
+Existing callers matching the `/breakglass` prefix support both commands without
+changes. Installation and App configuration are documented in
+[kernel/infra](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
+
+Run the workflow boundary tests with `python3 -m unittest discover -s scripts`
+(Python 3 and PyYAML required).
+
 ### `vuln-remediation.yml`
 
 Weekly Socket.dev scan + automated dependency remediation. 3-stage pipeline:
