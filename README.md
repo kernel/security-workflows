@@ -6,32 +6,14 @@ Reusable GitHub Actions workflows for vulnerability scanning and remediation acr
 
 ### `breakglass-merge.yml`
 
-Merges an emergency PR without its required approval when an org member comments
-`/breakglass <reason>`. The reason must contain at least 10 characters and is recorded
-on the PR before merging. The GitHub App token is scoped to the calling repository;
-the workflow never checks out PR code.
+An org member can comment `/breakglass <reason>` to merge an emergency PR without
+approval. The reason must contain at least 10 characters and is recorded on the PR.
 
-For a GitHub-native PR stack, use the same command on the **lowest open PR**.
-The async merge endpoint handles stacked PRs and updates the remaining stack;
-breakglass does not walk upward or merge dependent PRs automatically. To work upward
-from the base, comment separately on each next PR after the previous one merges.
+Uses GitHub's async merge API. For stacked PRs, only the **lowest open PR** is allowed;
+work upward with a separate comment on each PR. Waits up to five minutes for completion.
+Unconfirmed requests may finish later; check the PR before retrying.
 
-GitHub's async API includes all open PRs below the selected PR. Breakglass checks
-stack membership before submitting and refuses a PR with open PRs below it, keeping
-one comment scoped to one PR. The merge request pins the validated head SHA, requests
-a direct merge, and bypasses only rules the App is already permitted to bypass.
-The existing preference for squash, merge, then rebase is preserved.
-
-The workflow polls the returned request ID for up to five minutes. Only a `merged`
-result counts as success. Failures are explained on the PR; timeouts, polling errors,
-and queued results are reported as unconfirmed because the request may finish later.
-Check the PR's current merge status before retrying an unconfirmed request.
-
-Existing callers require no changes. Installation and App configuration are documented
-in [kernel/infra](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
-
-Run the workflow boundary tests with `python3 -m unittest discover -s scripts`
-(Python 3 and PyYAML required).
+[Setup and App configuration](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
 
 ### `vuln-remediation.yml`
 
