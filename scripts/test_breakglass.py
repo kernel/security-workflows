@@ -10,7 +10,7 @@ import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/breakglass-merge.yml"
 
-# Replace only the remote GitHub API; execute the workflow's real shell and Python.
+# Replace only the remote GitHub API; execute the workflow's real shell.
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -23,20 +23,23 @@ data = {}
 for i, arg in enumerate(args):
     if arg in ("-f", "-F"):
         key, value = args[i + 1].split("=", 1)
-        data[key] = value
-if "--input" in args:
-    data = json.load(sys.stdin)
+        data[key] = json.loads(value) if arg == "-F" and value in ("true", "false") else value
 parts = endpoint.split("/")
 number = int(parts[5]) if len(parts) > 5 else None
 result = {}
 error = None
 if method == "GET" and len(parts) == 4:
     result = state["repo"]
-elif method == "GET" and endpoint.endswith("/pulls"):
-    prs = [p for p in state["prs"].values() if p["state"] == "open"]
-    if "base" in data:
-        prs = [p for p in prs if p["base"]["ref"] == data["base"]]
-    result = [prs[:1], prs[1:]] if "--slurp" in args else prs
+elif method == "GET" and parts[4] == "stacks":
+    order = state.get("stack_order", [int(n) for n in state["prs"]])
+    result = {"pull_requests": [state["prs"][str(n)] for n in order]}
+elif method == "GET" and "/merge-async/" in endpoint:
+    state["polls"] = state.get("polls", 0) + 1
+    status = "pending" if state["polls"] < state.get("complete_after", 1) else state.get("terminal_status", "merged")
+    if status == "merged":
+        state["prs"][str(number)]["state"] = "closed"
+        state["merged"] = [number]
+    result = {"status": status, "details": {"message": "merge conflict" if status == "failed" else status}}
 elif method == "GET":
     key = str(number)
     state.setdefault("reads", {})[key] = state.get("reads", {}).get(key, 0) + 1
@@ -44,34 +47,26 @@ elif method == "GET":
         state["prs"][key]["head"]["sha"] = "changed"
     if state.get("change_base") == number and state["reads"][key] >= 2:
         state["prs"][key]["base"]["ref"] = "unexpected"
+    if state.get("change_stack") and state["reads"][key] >= 2:
+        state["stack_order"] = [4, 1, 2, 3]
+        state["prs"]["4"] = {"number": 4, "state": "open"}
     result = state["prs"][key]
 elif endpoint.endswith("/comments"):
     if state.get("fail_comment") == number:
         error = "comment unavailable"
+        del state["fail_comment"]
     else:
         state.setdefault("comments", []).append({"number": number, **data})
-elif method == "PATCH":
-    state["prs"][str(number)]["base"]["ref"] = data["base"]
-    state.setdefault("retargeted", []).append(number)
-    result = state["prs"][str(number)]
-elif endpoint.endswith("/merge"):
-    pr = state["prs"][str(number)]
-    if not any(c["number"] == number for c in state.get("comments", [])):
+elif endpoint.endswith("/merge-async"):
+    state.setdefault("requests", []).append({"number": number, **data})
+    if state.get("submit_error"):
+        error = "HTTP 403 forbidden"
+    elif not any(c["number"] == number for c in state.get("comments", [])):
         error = "missing audit comment before merge"
-    elif state.get("fail_merge") == number:
-        error = "merge conflict"
-    elif state.get("merge_false") == number:
-        result = {"merged": False, "message": "not mergeable"}
-    elif data["sha"] != pr["head"]["sha"]:
-        error = "head changed"
     else:
-        pr["state"] = "closed"
-        state.setdefault("merged", []).append({"number": number, "base": pr["base"]["ref"], **data})
-        if state.get("auto_retarget"):
-            for child in state["prs"].values():
-                if child["base"]["ref"] == pr["head"]["ref"]:
-                    child["base"]["ref"] = pr["base"]["ref"]
-        result = {"merged": True}
+        result = {"status": "pending", "details": {"uuid": "request-id", "expected_head_sha": data["sha"]}}
+elif endpoint.endswith("/merge"):
+    error = "Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge endpoint instead. (HTTP 403)"
 else:
     raise RuntimeError((method, endpoint, data))
 path.write_text(json.dumps(state))
@@ -82,9 +77,10 @@ print(json.dumps(result))
 '''
 
 
-def pr(number, head, base):
+def pr(number, head, base, stacked=True):
     return {
         "number": number, "state": "open", "draft": False,
+        "stack": {"number": 42, "position": number, "base": {"ref": "main"}} if stacked else None,
         "author_association": "MEMBER",
         "head": {"ref": head, "sha": f"sha-{number}", "repo": {"full_name": "kernel/example"}},
         "base": {"ref": base, "repo": {"full_name": "kernel/example"}},
@@ -92,7 +88,7 @@ def pr(number, head, base):
 
 
 class BreakglassTests(unittest.TestCase):
-    def run_workflow(self, *, body="/breakglass --stack emergency fix needed", association="MEMBER", **changes):
+    def run_workflow(self, *, body="/breakglass emergency fix needed", association="MEMBER", number=1, **changes):
         state = {
             "repo": {"default_branch": "main", "allow_merge_commit": True, "allow_squash_merge": True},
             "prs": {"1": pr(1, "first", "main"), "2": pr(2, "second", "first"), "3": pr(3, "third", "second")},
@@ -106,11 +102,13 @@ class BreakglassTests(unittest.TestCase):
             root = Path(tmp)
             (root / "gh").write_text(FAKE_GH)
             (root / "gh").chmod(0o755)
+            (root / "sleep").write_text("#!/bin/sh\nexit 0\n")
+            (root / "sleep").chmod(0o755)
             (root / "state.json").write_text(json.dumps(state))
             env = {
                 **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                 "FAKE_STATE": str(root / "state.json"), "ACTOR": "operator",
-                "REPO": "kernel/example", "NUMBER": "1", "BODY": body,
+                "REPO": "kernel/example", "NUMBER": str(number), "BODY": body,
                 "REQUESTER_ASSOCIATION": association, "GITHUB_STEP_SUMMARY": str(root / "summary"),
                 "RUN_URL": "https://example.com/run",
             }
@@ -119,94 +117,87 @@ class BreakglassTests(unittest.TestCase):
                 subprocess.run(["bash", "-c", refusal], env=env, cwd=root, check=True, capture_output=True)
             return result, json.loads((root / "state.json").read_text())
 
-    def test_merges_stack_bottom_up_into_main_with_audit_per_pr(self):
-        result, state = self.run_workflow()
+    def test_merges_only_bottom_pr_using_async_endpoint(self):
+        result, state = self.run_workflow(complete_after=2)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([(m["number"], m["base"], m["merge_method"], m["sha"]) for m in state["merged"]],
-                         [(1, "main", "merge", "sha-1"), (2, "main", "merge", "sha-2"), (3, "main", "merge", "sha-3")])
-        self.assertEqual(state["retargeted"], [2, 3])
-        self.assertEqual([c["number"] for c in state["comments"]], [1, 2, 3])
-        for comment in state["comments"]:
-            self.assertIn("emergency fix needed", comment["body"])
-            self.assertIn("@operator", comment["body"])
+        self.assertEqual(state["merged"], [1])
+        self.assertEqual(state["requests"], [{"number": 1, "merge_method": "squash", "sha": "sha-1", "merge_action": "direct_merge", "bypass_rules": True}])
+        self.assertEqual(state["prs"]["2"]["state"], "open")
+        self.assertEqual(state["prs"]["3"]["state"], "open")
+        self.assertEqual([c["number"] for c in state["comments"]], [1])
+        self.assertIn("emergency fix needed", state["comments"][0]["body"])
 
-    def test_single_pr_command_preserves_squash_preference(self):
-        result, state = self.run_workflow(body="/breakglass emergency fix needed")
+    def test_refuses_higher_pr_with_open_pr_below_it(self):
+        result, state = self.run_workflow(number=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("requests", state)
+        self.assertNotIn("merged", state)
+        self.assertIn("below this one first: #1", state["comments"][-1]["body"])
+
+    def test_allows_next_pr_after_lower_pr_has_merged(self):
+        prs = {"1": pr(1, "first", "main"), "2": pr(2, "second", "main"), "3": pr(3, "third", "second")}
+        prs["1"].update(state="closed", merged_at="2026-01-01T00:00:00Z")
+        result, state = self.run_workflow(number=2, prs=prs)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(state["merged"], [{"number": 1, "base": "main", "merge_method": "squash", "sha": "sha-1"}])
-        self.assertNotIn("retargeted", state)
+        self.assertEqual(state["merged"], [2])
+        self.assertEqual(state["prs"]["3"]["state"], "open")
 
-    def test_refuses_unsafe_or_ambiguous_stack_before_any_merge(self):
-        for case in ("fork", "author", "draft", "branching", "cycle", "nondefault", "no_merge_commits"):
+    def test_unstacked_pr_uses_same_async_merge_path(self):
+        result, state = self.run_workflow(prs={"1": pr(1, "first", "main", stacked=False)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["merged"], [1])
+        self.assertEqual(state["requests"][0]["merge_method"], "squash")
+
+    def test_rejects_unauthorized_requests_without_merge_submission(self):
+        for case in ("requester", "fork", "author", "short_reason", "audit_failure"):
             with self.subTest(case=case):
-                prs = {"1": pr(1, "first", "main"), "2": pr(2, "second", "first")}
-                repo = {"default_branch": "main", "allow_merge_commit": True}
-                if case == "fork":
-                    prs["2"]["head"]["repo"]["full_name"] = "external/example"
+                changes = {}
+                prs = {"1": pr(1, "first", "main")}
+                if case == "requester":
+                    changes["association"] = "CONTRIBUTOR"
+                elif case == "fork":
+                    prs["1"]["head"]["repo"]["full_name"] = "external/example"
                 elif case == "author":
-                    prs["2"]["author_association"] = "CONTRIBUTOR"
-                elif case == "draft":
-                    prs["2"]["draft"] = True
-                elif case == "branching":
-                    prs["3"] = pr(3, "other", "first")
-                elif case == "cycle":
-                    prs["2"]["head"]["ref"] = "main"
-                elif case == "nondefault":
-                    prs["1"]["base"]["ref"] = "other"
-                elif case == "no_merge_commits":
-                    repo["allow_merge_commit"] = False
-                result, state = self.run_workflow(prs=prs, repo=repo)
+                    prs["1"]["author_association"] = "CONTRIBUTOR"
+                elif case == "short_reason":
+                    changes["body"] = "/breakglass short"
+                elif case == "audit_failure":
+                    changes["fail_comment"] = 1
+                result, state = self.run_workflow(prs=prs, **changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("requests", state)
+                if case == "requester":
+                    self.assertNotIn("comments", state)
+
+    def test_refuses_moved_head_base_or_new_downstack_pr(self):
+        for change in ("change_head", "change_base", "change_stack"):
+            with self.subTest(change=change):
+                result, state = self.run_workflow(**{change: 1})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("requests", state)
+                self.assertNotIn("merged", state)
+
+    def test_reports_terminal_failure_and_does_not_claim_success(self):
+        result, state = self.run_workflow(terminal_status="failed")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("merged", state)
+        self.assertIn("Could not merge: merge conflict", state["comments"][-1]["body"])
+
+    def test_timeout_or_queue_reports_unconfirmed_merge(self):
+        for changes in ({"complete_after": 100}, {"terminal_status": "enqueued"}, {"submit_error": True}):
+            with self.subTest(changes=changes):
+                result, state = self.run_workflow(**changes)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("merged", state)
-                self.assertNotIn("retargeted", state)
-                self.assertIn("Breakglass did not merge", state["comments"][-1]["body"])
-
-    def test_denies_nonmember_silently(self):
-        result, state = self.run_workflow(association="CONTRIBUTOR")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("merged", state)
-        self.assertNotIn("comments", state)
-
-    def test_stops_on_moved_head_after_retargeting(self):
-        result, state = self.run_workflow(change_head=2)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual([m["number"] for m in state["merged"]], [1])
-        self.assertEqual(state["retargeted"], [2])
-        self.assertIn("#1", state["comments"][-1]["body"])
-        self.assertIn("changed", state["comments"][-1]["body"])
-
-    def test_handles_github_automatically_retargeting_dependents(self):
-        result, state = self.run_workflow(auto_retarget=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([(m["number"], m["base"]) for m in state["merged"]], [(1, "main"), (2, "main"), (3, "main")])
-        self.assertNotIn("retargeted", state)
-
-    def test_stack_option_does_not_count_toward_reason_length(self):
-        result, state = self.run_workflow(body="/breakglass --stack short")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("merged", state)
-        self.assertIn("at least 10 characters", state["comments"][-1]["body"])
-
-    def test_stops_if_dependent_base_moves_after_retargeting(self):
-        result, state = self.run_workflow(change_base=2)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual([m["number"] for m in state["merged"]], [1])
-        self.assertIn("changed", state["comments"][-1]["body"])
+                body = state["comments"][-1]["body"]
+                self.assertIn("merge not confirmed", body)
+                self.assertNotIn("Nothing was merged", body)
 
     def test_ignores_other_commands_with_breakglass_prefix(self):
         result, state = self.run_workflow(body="/breakglass-stack emergency fix needed")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("merged", state)
+        self.assertNotIn("requests", state)
         self.assertNotIn("comments", state)
-
-    def test_stops_on_merge_or_audit_failure_and_reports_partial_progress(self):
-        for failure in ("fail_merge", "fail_comment", "merge_false"):
-            with self.subTest(failure=failure):
-                result, state = self.run_workflow(**{failure: 2})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual([m["number"] for m in state["merged"]], [1])
-                self.assertIn("#1", state["comments"][-1]["body"])
-                self.assertIn("stopped", state["comments"][-1]["body"].lower())
 
 
 if __name__ == "__main__":

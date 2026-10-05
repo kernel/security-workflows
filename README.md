@@ -11,29 +11,24 @@ Merges an emergency PR without its required approval when an org member comments
 on the PR before merging. The GitHub App token is scoped to the calling repository;
 the workflow never checks out PR code.
 
-To merge a linear PR stack, comment on its **bottom PR**, targeting the repository's
-default branch:
+For a GitHub-native PR stack, use the same command on the **lowest open PR**.
+The async merge endpoint handles stacked PRs and updates the remaining stack;
+breakglass does not walk upward or merge dependent PRs automatically. To work upward
+from the base, comment separately on each next PR after the previous one merges.
 
-```
-/breakglass --stack emergency fix spans these dependent PRs
-```
+GitHub's async API includes all open PRs below the selected PR. Breakglass checks
+stack membership before submitting and refuses a PR with open PRs below it, keeping
+one comment scoped to one PR. The merge request pins the validated head SHA, requests
+a direct merge, and bypasses only rules the App is already permitted to bypass.
+The existing preference for squash, merge, then rebase is preserved.
 
-Stack mode follows open PRs whose base branch is the preceding PR's head branch. It
-validates the entire discovered stack before starting, then merges from bottom to
-top into the default branch, retargeting each dependent PR after its parent merges.
-Every PR gets the requester, reason, and stack order recorded before its merge.
+The workflow polls the returned request ID for up to five minutes. Only a `merged`
+result counts as success. Failures are explained on the PR; timeouts, polling errors,
+and queued results are reported as unconfirmed because the request may finish later.
+Check the PR's current merge status before retrying an unconfirmed request.
 
-Merge commits must be enabled: stack mode uses them to preserve the commits shared
-with dependent branches. The ordinary single-PR command still prefers squash merging.
-Stacks containing forks, non-member authors, drafts, cycles, or multiple dependents
-on one branch are refused. A changed head or base, a merge conflict, or an API error
-stops the operation and reports which PRs already merged. Merges are not rolled back;
-a retargeted PR can remain pointed at the default branch. Resume from the first
-remaining PR targeting the default branch after resolving the failure.
-
-Existing callers matching the `/breakglass` prefix support both commands without
-changes. Installation and App configuration are documented in
-[kernel/infra](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
+Existing callers require no changes. Installation and App configuration are documented
+in [kernel/infra](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
 
 Run the workflow boundary tests with `python3 -m unittest discover -s scripts`
 (Python 3 and PyYAML required).
