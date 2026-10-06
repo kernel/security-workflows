@@ -4,6 +4,17 @@ Reusable GitHub Actions workflows for vulnerability scanning and remediation acr
 
 ## Workflows
 
+### `breakglass-merge.yml`
+
+An org member can comment `/breakglass <reason>` to merge an emergency PR without
+approval. The reason must contain at least 10 characters and is recorded on the PR.
+
+Uses GitHub's async merge API. For stacked PRs, only the **lowest open PR** is allowed;
+work upward with a separate comment on each PR. Waits up to five minutes for completion.
+Unconfirmed requests may finish later; check the PR before retrying.
+
+[Setup and App configuration](https://github.com/kernel/infra/blob/main/docs/breakglass.md).
+
 ### `vuln-remediation.yml`
 
 Weekly Socket.dev scan + automated dependency remediation. 3-stage pipeline:

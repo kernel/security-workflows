@@ -94,7 +94,7 @@ jobs:
             *) deny "@$ACTOR is $REQUESTER_ASSOCIATION, not an org member" ;;
           esac
 
-          pr="$(gh api "/repos/$REPO/pulls/$NUMBER")"
+          pr="$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "/repos/$REPO/pulls/$NUMBER")"
 
           if [ "$(echo "$pr" | jq -r .state)" != "open" ]; then
             refuse "This PR is already closed."
@@ -117,6 +117,29 @@ jobs:
           if [ "${#reason}" -lt 10 ]; then
             refuse "Give a reason of at least 10 characters: \`/breakglass prod-jfk-unikraft-9 wedged, api 5xx\`. Whoever reads this commit later has only what you type here."
           fi
+
+          # Async merges include every open PR below the selected PR. Refuse those
+          # requests: one comment authorizes one PR, not an implicit downstack merge.
+          ensure_bottom() {
+            local stack_number stack index lower
+            if [ "$(echo "$pr" | jq -r '.stack // empty')" = "" ]; then
+              return
+            fi
+            stack_number="$(echo "$pr" | jq -r '.stack.number // empty')"
+            if [ -z "$stack_number" ]; then
+              refuse "Could not identify this PR's stack. No merge was requested."
+            fi
+            stack="$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "/repos/$REPO/stacks/$stack_number")"
+            index="$(echo "$stack" | jq --argjson number "$NUMBER" '.pull_requests | map(.number) | index($number)')"
+            if [ "$index" = "null" ]; then
+              refuse "This PR is no longer in its reported stack. Comment again after refreshing it."
+            fi
+            lower="$(echo "$stack" | jq -r --argjson index "$index" '.pull_requests[:$index] | map(select(.state == "open") | "#" + (.number | tostring)) | join(", ")')"
+            if [ -n "$lower" ]; then
+              refuse "Merge the open PRs below this one first: $lower. Breakglass only authorizes the commented PR."
+            fi
+          }
+          ensure_bottom
 
           # Recorded before the merge, never after: a merge whose justification failed to post
           # is exactly the unexplained merge this exists to prevent. Worded as a request rather
@@ -141,15 +164,52 @@ jobs:
             [ "$allowed" = "true" ] && break
           done
 
-          # Merge the exact commit the checks above were run against. Everything validated so
-          # far -- the fork check especially -- describes this head and nothing later; without
-          # pinning it, a push landing between validation and merge would be merged unreviewed
-          # on the strength of a decision made about different code. A moved head 409s here.
+          # Recheck stack membership just before submission, and pin the validated head.
           head="$(echo "$pr" | jq -r .head.sha)"
-          if ! gh api -X PUT "/repos/$REPO/pulls/$NUMBER/merge" \
-              -f merge_method="$method" -f sha="$head" >/dev/null 2>merge-error.txt; then
-            refuse "Could not merge: $(tr -d '\n' < merge-error.txt). The reason above is recorded; fix the PR and comment again."
+          base="$(echo "$pr" | jq -r .base.ref)"
+          pr="$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "/repos/$REPO/pulls/$NUMBER")"
+          if [ "$(echo "$pr" | jq -r .head.sha)" != "$head" ] || \
+              [ "$(echo "$pr" | jq -r .base.ref)" != "$base" ]; then
+            refuse "This PR changed during validation. Comment again to validate its current head and base."
           fi
+          ensure_bottom
+
+          # Stack-aware endpoint. Bypass only rules the app already has permission to bypass.
+          # Direct merge preserves breakglass's immediate-merge behavior instead of queuing it.
+          touch .async-requested
+          if ! gh api -X PUT "/repos/$REPO/pulls/$NUMBER/merge-async" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -f merge_method="$method" -f sha="$head" \
+              -f merge_action=direct_merge -F bypass_rules=true > merge-result.json 2>merge-error.txt; then
+            refuse "Could not request the merge: $(tr -d '\n' < merge-error.txt). Check this PR's current merge status before trying again."
+          fi
+
+          uuid="$(jq -r '.details.uuid // empty' merge-result.json)"
+          for attempt in $(seq 0 60); do
+            status="$(jq -r .status merge-result.json)"
+            [ "$status" != "pending" ] && break
+            [ "$attempt" = 60 ] && break
+            if [ -z "$uuid" ]; then
+              refuse "GitHub accepted the merge without a request ID. Check this PR's merge status."
+            fi
+            sleep 5
+            gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/$REPO/pulls/$NUMBER/merge-async/$uuid" > merge-result.json
+          done
+          case "$status" in
+            merged) rm .async-requested ;;
+            failed)
+              rm .async-requested
+              refuse "Could not merge: $(jq -r .details.message merge-result.json). Fix the PR and comment again."
+              ;;
+            pending)
+              refuse "Merge request $uuid is still pending after five minutes. It may finish later; check this PR before trying again."
+              ;;
+            enqueued)
+              refuse "This PR is queued, not confirmed merged. Check its merge queue status."
+              ;;
+            *) refuse "Unexpected merge status: $status. Check this PR before trying again." ;;
+          esac
 
           {
             echo "### Breakglass merge"
@@ -177,7 +237,13 @@ jobs:
             exit 0
           fi
 
-          if [ -f refusal.txt ]; then
+          if [ -f .async-requested ]; then
+            detail="See [the run]($RUN_URL) for details."
+            if [ -f refusal.txt ]; then
+              detail="$(cat refusal.txt)"
+            fi
+            body="⚠️ **Breakglass merge not confirmed.** $detail The asynchronous request may still complete; check this PR's merge status."
+          elif [ -f refusal.txt ]; then
             body="⚠️ **Breakglass did not merge.** $(cat refusal.txt)"
           else
             body="⚠️ **Breakglass failed** for a reason it could not explain here — see [the run]($RUN_URL). Nothing was merged."
