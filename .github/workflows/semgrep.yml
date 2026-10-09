@@ -20,6 +20,13 @@ jobs:
     timeout-minutes: 20
     container:
       image: semgrep/semgrep
+      # Anonymous Docker Hub pulls share the caller's runner IP rate limit and
+      # have been failing this job at Initialize containers in multiple repos.
+      # In a reusable workflow these resolve from the caller's repo (with
+      # secrets: inherit); when unset the runner falls back to an anonymous pull.
+      credentials:
+        username: ${{ vars.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
     outputs:
       findings_count: ${{ steps.count.outputs.findings_count }}
     steps:
