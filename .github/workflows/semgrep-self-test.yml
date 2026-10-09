@@ -1,0 +1,13 @@
+name: Semgrep Self-Test
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/semgrep.yml'
+      - '.github/workflows/semgrep-self-test.yml'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    uses: ./.github/workflows/semgrep.yml
+    secrets: inherit
