@@ -238,6 +238,19 @@ class DiffValidatorTests(RemediationFixture):
 
         self.assertTrue(result.ok, result.errors)
 
+    def test_accepts_python_requirements_lockfiles(self) -> None:
+        write(self.root / "pyproject.toml", "[project]\ndependencies = ['aiohttp==3.13.3']\n")
+        write(self.root / "requirements.lock", "aiohttp==3.13.3\n")
+        write(self.root / "requirements-dev.lock", "aiohttp==3.13.3\n")
+        self.commit_all()
+        write(self.root / "pyproject.toml", "[project]\ndependencies = ['aiohttp==3.13.4']\n")
+        write(self.root / "requirements.lock", "aiohttp==3.13.4\n")
+        write(self.root / "requirements-dev.lock", "aiohttp==3.13.4\n")
+
+        result = vr.validate_diff(self.root, ["pyproject.toml", "requirements.lock", "requirements-dev.lock"])
+
+        self.assertTrue(result.ok, result.errors)
+
 
 class ConfirmationTests(RemediationFixture):
     def test_confirmation_fails_when_old_vulnerable_version_remains(self) -> None:

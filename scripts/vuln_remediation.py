@@ -49,7 +49,7 @@ PYTHON_DEP_FILES = {
     "Pipfile.lock",
 }
 
-REQUIREMENTS_RE = re.compile(r"(^|/)requirements[^/]*\.txt$")
+REQUIREMENTS_RE = re.compile(r"(^|/)requirements[^/]*\.(?:txt|lock)$")
 MAX_ALLOWED_FILE_SIZE = 5 * 1024 * 1024
 
 
