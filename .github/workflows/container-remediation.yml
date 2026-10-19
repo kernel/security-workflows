@@ -101,18 +101,16 @@ jobs:
         with:
           name: container-scan-report
 
-      - name: Install Claude Code CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
 
       - name: Triage findings
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/triage-prompt.md" \
             | envsubst '${GITHUB_REPOSITORY}' \
-            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+            | codex exec --model gpt-5.5 --dangerously-bypass-approvals-and-sandbox --ephemeral -
 
       - name: Upload triage results
         uses: actions/upload-artifact@v4
@@ -172,15 +170,13 @@ jobs:
         env:
           GOPRIVATE: github.com/kernel/*
 
-      - name: Install Claude Code CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
 
       - name: Apply fixes
         timeout-minutes: 8
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOPRIVATE: github.com/kernel/*
           GO_MODULE_DIR: ${{ inputs.go-version-file != '' && format('{0}', inputs.go-version-file) || '.' }}
         run: |
@@ -188,7 +184,7 @@ jobs:
           export GO_MODULE_DIR="$(dirname "$GO_MODULE_DIR")"
           curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/fix-prompt.md" \
             | envsubst '${GITHUB_REPOSITORY} ${DATE} ${GO_MODULE_DIR}' \
-            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+            | codex exec --model gpt-5.5 --dangerously-bypass-approvals-and-sandbox --ephemeral -
 
       - name: Check for changes
         id: diff
