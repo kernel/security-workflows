@@ -10,8 +10,12 @@ name: PR Risk
 # rewritten so it never shows a stale "yes".
 #
 # Credentials are split by step. The model runs with no tools and no GitHub token, reading
-# only the PR data gathered with the caller's read-only token. The kernel-internal token is
-# minted after the model has finished, scoped to this repo and to pull-request writes.
+# only the PR data gathered with a read-only kernel-internal token. The token that can comment
+# is minted after the model has finished, scoped to this repo and to pull-request writes.
+#
+# Gather uses the app rather than the workflow token because both the workflow token and the
+# pull_request event payload report private org members as CONTRIBUTOR, and every Kernel
+# member is private. An org-installed app's token sees the real MEMBER/OWNER association.
 
 on:
   workflow_call:
@@ -61,12 +65,23 @@ jobs:
           curl -fsSL "$base/scripts/pr_risk.py" -o /tmp/pr_risk.py
           curl -fsSL "$base/.github/workflows/pr-risk/classify-prompt.md" -o /tmp/pr-risk-prompt.md
 
+      - name: Generate read token
+        id: read-token
+        # Pinned to a commit because this step is handed the app's private key. d72941d is v1.12.0.
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: read
+
       - name: Gather
         id: gather
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.read-token.outputs.token }}
           DENY_PATHS: ${{ inputs.deny-paths }}
-          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
         run: python3 /tmp/pr_risk.py gather --repo "$REPO" --number "$NUMBER" --dir "$WORKDIR"
 
       - name: Install Claude Code CLI
