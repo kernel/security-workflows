@@ -3,9 +3,10 @@ name: PR Risk
 # Shadow-mode risk check for small pull requests. Comments whether the PR would have been
 # auto-approved and why; it never approves, so a human review is still what merges a PR.
 #
-# A PR is skipped, with no comment, when it is a draft, comes from a fork, was not opened by an
-# repo writer (bots included), changes more than 50 lines, or touches a deny-listed path
-# (defaults in scripts/pr_risk.py plus the caller's `deny-paths`). Otherwise Claude classifies the diff and may deny it on its own judgment.
+# A PR is skipped, with no comment, when it is a draft, comes from a fork, was opened by someone
+# without write access (bots included), changes more than 50 lines, or touches a deny-listed
+# path (defaults in scripts/pr_risk.py plus the caller's `deny-paths`). Otherwise Claude
+# classifies the diff and may deny it on its own judgment.
 # If a PR that already has a comment becomes ineligible on a later push, the comment is
 # rewritten so it never shows a stale "yes".
 #

@@ -72,8 +72,9 @@ it leaves one comment saying whether the PR would have been auto-approved and wh
 approves.
 
 These PRs are skipped with no comment: drafts, fork PRs, PRs whose author lacks write
-access to the repo (including bots), PRs over 50 changed lines, and PRs that touch a deny-listed path. The defaults live in `scripts/pr_risk.py`, and callers can add
-more through `deny-paths`. Claude classifies everything else and can deny a PR on its own
+access to the repo (including bots), PRs over 50 changed lines, and PRs that touch a
+deny-listed path. The defaults live in `scripts/pr_risk.py`, and callers can add more
+through `deny-paths`. Claude classifies everything else and can deny a PR on its own
 judgment. The comment stores its verdict in a hidden `pr-risk:v1` JSON marker for later analysis.
 
 ```yaml
