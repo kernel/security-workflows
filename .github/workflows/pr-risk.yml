@@ -66,6 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DENY_PATHS: ${{ inputs.deny-paths }}
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
         run: python3 /tmp/pr_risk.py gather --repo "$REPO" --number "$NUMBER" --dir "$WORKDIR"
 
       - name: Install Claude Code CLI
