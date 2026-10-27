@@ -67,7 +67,7 @@ jobs:
 
 ### `pr-risk.yml`
 
-Shadow-mode risk check for small PRs. On `ready_for_review` and every push, it leaves one
+Shadow-mode risk check for small PRs. When a PR is opened or marked ready, and on every push, it leaves one
 comment saying whether the PR would have been auto-approved and why. It never approves.
 
 These PRs are skipped with no comment: drafts, fork PRs, PRs over 50 changed lines, and PRs
@@ -80,7 +80,7 @@ judgment. The comment stores its verdict in a hidden `pr-risk:v1` JSON marker fo
 name: PR Risk
 on:
   pull_request:
-    types: [ready_for_review, synchronize]
+    types: [opened, ready_for_review, synchronize]
 permissions:
   contents: read
   pull-requests: read
