@@ -117,6 +117,10 @@ class GitHub:
     def comments(self, number: int) -> list[dict[str, Any]]:
         return self.paginate(f"/repos/{self.repo}/issues/{number}/comments?per_page=100")
 
+    def permission(self, login: str) -> str:
+        data = json.loads(self.api(f"/repos/{self.repo}/collaborators/{urllib.parse.quote(login)}/permission"))
+        return data["permission"]
+
     def file_at(self, path: str, ref: str) -> str | None:
         try:
             return self.api("-H", "Accept: application/vnd.github.raw",
@@ -160,17 +164,19 @@ def deny_patterns(extra: str) -> list[str]:
     return list(DEFAULT_DENY_PATHS) + [line for line in lines if line and not line.startswith("#")]
 
 
-def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns: list[str]) -> str | None:
+def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns: list[str],
+                      author_permission: str) -> str | None:
     if pr.get("draft"):
         return "draft PR"
     head_repo = (pr["head"].get("repo") or {}).get("full_name")
     if head_repo != pr["base"]["repo"]["full_name"]:
         return "PR comes from a fork"
-    # Only org members' own changes are candidates. Bots are never members, so their PRs are
-    # skipped too: no person wrote them, and approving them unread is a separate decision.
-    # This is only right when read with the app token; see the note in pr-risk.yml.
-    if pr.get("author_association") not in ("OWNER", "MEMBER"):
-        return "author is not an org member"
+    # Only changes by people who can already push here are candidates. Bots have no repo
+    # permission, so their PRs are skipped too: no person wrote them, and approving them unread
+    # is a separate decision. author_association can't be used: every Kernel member is private,
+    # and both the workflow token and the event payload report private members as CONTRIBUTOR.
+    if author_permission not in ("admin", "write"):
+        return "author does not have write access"
     changed = pr["additions"] + pr["deletions"]
     if changed > MAX_CHANGED_LINES:
         return f"{changed} changed lines (limit {MAX_CHANGED_LINES})"
@@ -286,7 +292,7 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
     pr = gh.pull(number)
     files = gh.files(number)
     existing = find_comment(gh.comments(number))
-    reason = ineligible_reason(pr, files, deny_patterns(extra_deny))
+    reason = ineligible_reason(pr, files, deny_patterns(extra_deny), gh.permission(pr["user"]["login"]))
     gate = {
         "sha": pr["head"]["sha"],
         "eligible": reason is None,

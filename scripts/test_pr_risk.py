@@ -29,6 +29,8 @@ if "/contents/missing" in path:
     sys.exit(1)
 if "/contents/" in path:
     print("raw file", end="")
+elif path.endswith("/permission"):
+    print(json.dumps({"permission": "none", "role_name": ""}))
 elif "--slurp" in sys.argv:
     print(json.dumps([[{"n": 1}, {"n": 2}], [{"n": 3}]]))
 else:
@@ -38,10 +40,10 @@ else:
 PATCH = "@@ -10,3 +10,4 @@ flags:\n   - a\n   - b\n+  - c\n   - d"
 
 
-def pr(additions=1, deletions=0, draft=False, fork=False, sha="abc1234def", association="MEMBER"):
+def pr(additions=1, deletions=0, draft=False, fork=False, sha="abc1234def"):
     return {
         "number": 7, "draft": draft, "title": "Add an org to a flag", "body": "Adds one org.",
-        "user": {"login": "someone"}, "author_association": association,
+        "user": {"login": "someone"}, "author_association": "CONTRIBUTOR",
         "additions": additions, "deletions": deletions,
         "head": {"sha": sha, "repo": {"full_name": "external/infra" if fork else "kernel/infra"}},
         "base": {"sha": "base000", "ref": "main", "repo": {"full_name": "kernel/infra"}},
@@ -54,12 +56,13 @@ def file(name="posthog/flags/prod.yaml", patch=PATCH, **extra):
 
 
 class FakeGitHub:
-    def __init__(self, pull, files, comments=(), contents=None, head_after=None):
+    def __init__(self, pull, files, comments=(), contents=None, head_after=None, permission="write"):
         self._pull = pull
         self._files = list(files)
         self._comments = list(comments)
         self._contents = contents or {}
         self.head_after = head_after
+        self._permission = permission
         self.created = []
         self.updated = []
         self.pull_reads = 0
@@ -75,6 +78,9 @@ class FakeGitHub:
 
     def comments(self, number):
         return self._comments
+
+    def permission(self, login):
+        return self._permission
 
     def file_at(self, path, ref):
         return self._contents.get((path, ref))
@@ -130,21 +136,29 @@ class PRRiskTests(unittest.TestCase):
         renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
         del renamed["patch"]
         cases = {
-            "draft": (pr(draft=True), [file()]),
-            "fork": (pr(fork=True), [file()]),
-            "not an org member": (pr(association="CONTRIBUTOR"), [file()]),
-            "author is not an org member": (pr(association="NONE"), [file()]),
-            "51 changed lines": (pr(additions=30, deletions=21), [file()]),
-            "deny list (`identity/**`)": (pr(), [file("identity/access.go")]),
-            "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")]),
-            "`bin/helper` has no reviewable text diff": (pr(additions=0), [binary]),
-            "`b.yaml` has no reviewable text diff": (pr(additions=0), [renamed]),
+            "draft": (pr(draft=True), [file()], "write"),
+            "fork": (pr(fork=True), [file()], "write"),
+            "author does not have write access": (pr(), [file()], "read"),
+            "does not have write access": (pr(), [file()], "none"),
+            "51 changed lines": (pr(additions=30, deletions=21), [file()], "write"),
+            "deny list (`identity/**`)": (pr(), [file("identity/access.go")], "write"),
+            "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")], "write"),
+            "`bin/helper` has no reviewable text diff": (pr(additions=0), [binary], "write"),
+            "`b.yaml` has no reviewable text diff": (pr(additions=0), [renamed], "write"),
         }
-        for expected, (p, files) in cases.items():
+        for expected, (p, files, permission) in cases.items():
             with self.subTest(expected=expected):
-                self.assertIn(expected, pr_risk.ineligible_reason(p, files, patterns))
-        self.assertIsNone(pr_risk.ineligible_reason(pr(additions=25, deletions=25), [file()], patterns))
-        self.assertIsNone(pr_risk.ineligible_reason(pr(association="OWNER"), [file()], patterns))
+                self.assertIn(expected, pr_risk.ineligible_reason(p, files, patterns, permission))
+        # pr() reports CONTRIBUTOR, as the API does for every private member; it must not matter.
+        self.assertIsNone(pr_risk.ineligible_reason(pr(additions=25, deletions=25), [file()], patterns, "write"))
+        self.assertIsNone(pr_risk.ineligible_reason(pr(), [file()], patterns, "admin"))
+
+    def test_bot_author_is_silent(self):
+        gh = FakeGitHub(pr(), [file()], permission="none")
+        gate, code, model_input = self.run_pr(gh)
+        self.assertEqual(gate["reason"], "author does not have write access")
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
 
     def test_ineligible_without_comment_is_silent(self):
         gh = FakeGitHub(pr(additions=200), [file()])
@@ -262,12 +276,14 @@ class PRRiskTests(unittest.TestCase):
                 self.assertEqual(gh.file_at("dir/a b.yaml", "abc"), "raw file")
                 self.assertIsNone(gh.file_at("missing.yaml", "abc"))
                 gh.update_comment(9, "hello")
+                self.assertEqual(gh.permission("kernel-internal[bot]"), "none")
             calls = json.loads((root / "log.json").read_text())
         self.assertEqual(calls[0]["args"], ["api", "--paginate", "--slurp", "/repos/kernel/infra/issues/7/comments?per_page=100"])
         self.assertIn("/repos/kernel/infra/contents/dir/a%20b.yaml?ref=abc", calls[1]["args"])
         self.assertIn("Accept: application/vnd.github.raw", calls[1]["args"])
         self.assertEqual(calls[3]["args"][:4], ["api", "-X", "PATCH", "/repos/kernel/infra/issues/comments/9"])
         self.assertEqual(json.loads(calls[3]["stdin"]), {"body": "hello"})
+        self.assertEqual(calls[4]["args"], ["api", "/repos/kernel/infra/collaborators/kernel-internal%5Bbot%5D/permission"])
 
     def test_workflow_isolates_the_model(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
@@ -280,12 +296,7 @@ class PRRiskTests(unittest.TestCase):
         names = list(steps)
         self.assertLess(names.index("Classify"), names.index("Generate app token"))
         self.assertEqual(steps["Generate app token"]["with"]["permission-pull-requests"], "write")
-        # The workflow token and event payload both report private members as CONTRIBUTOR.
-        self.assertEqual(steps["Gather"]["env"]["GH_TOKEN"], "${{ steps.read-token.outputs.token }}")
-        read = steps["Generate read token"]["with"]
-        self.assertEqual({k: v for k, v in read.items() if k.startswith("permission-")},
-                         {"permission-contents": "read", "permission-pull-requests": "read"})
-        self.assertLess(names.index("Generate read token"), names.index("Gather"))
+        self.assertEqual(steps["Gather"]["env"]["GH_TOKEN"], "${{ github.token }}")
         triggers = workflow[True]["workflow_call"]
         self.assertEqual(set(triggers["secrets"]), {"ADMIN_APP_ID", "ADMIN_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY"})
 
