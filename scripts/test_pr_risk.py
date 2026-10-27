@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,12 @@ class FakeGitHub:
         self.updated.append((comment_id, body))
 
 
+def visible_words(body):
+    text = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+    text = re.sub(r"<[^>]+>|\]\([^)]*\)|[*`·\[]", " ", text)
+    return len(text.split())
+
+
 VERDICT = {"tier": "low", "deny": False, "category": "flag-allowlist", "confidence": "high",
            "reason": "Adds one org to an existing beta allowlist."}
 
@@ -116,15 +123,19 @@ class PRRiskTests(unittest.TestCase):
 
     def test_ineligible_reasons(self):
         patterns = pr_risk.deny_patterns("identity/**\n# comment\n")
-        binary = file("logo.png")
+        # GitHub reports binaries and pure renames with no patch and zero changed lines.
+        binary = file("bin/helper", additions=0, changes=0)
         del binary["patch"]
+        renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
+        del renamed["patch"]
         cases = {
             "draft": (pr(draft=True), [file()]),
             "fork": (pr(fork=True), [file()]),
             "51 changed lines": (pr(additions=30, deletions=21), [file()]),
             "deny list (`identity/**`)": (pr(), [file("identity/access.go")]),
             "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")]),
-            "no reviewable text diff": (pr(), [binary]),
+            "`bin/helper` has no reviewable text diff": (pr(additions=0), [binary]),
+            "`b.yaml` has no reviewable text diff": (pr(additions=0), [renamed]),
         }
         for expected, (p, files) in cases.items():
             with self.subTest(expected=expected):
@@ -208,9 +219,9 @@ class PRRiskTests(unittest.TestCase):
         long_reason = " ".join(["word"] * 200)
         gate = {"sha": "abc1234def", "eligible": True, "reason": None, "changed_lines": 3, "comment_id": None}
         body = pr_risk.render(gate, {**VERDICT, "deny": True, "reason": long_reason}, "https://x", "now")
-        self.assertLess(pr_risk.visible_words(body), 100)
+        self.assertLess(visible_words(body), 100)
         gate = {**gate, "eligible": False, "reason": "`" + "a/" * 40 + "x.go` is on the deny list (`**/*secret*`)"}
-        self.assertLess(pr_risk.visible_words(pr_risk.render(gate, None, "https://x", "now")), 100)
+        self.assertLess(visible_words(pr_risk.render(gate, None, "https://x", "now")), 100)
 
     def test_model_input(self):
         content = "\n".join(f"line {n}" for n in range(1, 101))

@@ -176,7 +176,7 @@ def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns:
                 if regex.match(path):
                     return f"`{path}` is on the deny list (`{pattern}`)"
     for f in files:
-        if f.get("changes", 0) and "patch" not in f:
+        if "patch" not in f:
             return f"`{f['filename']}` has no reviewable text diff"
     return None
 
@@ -380,12 +380,6 @@ def render(gate: dict[str, Any], verdict: dict[str, Any] | None, run_url: str, n
         "React 👍 or 👎 if this call looks right or wrong.</sub>",
         f"<!-- pr-risk:v1 {data} -->",
     ])
-
-
-def visible_words(body: str) -> int:
-    text = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-    text = re.sub(r"<[^>]+>|\]\([^)]*\)|[*`·\[]", " ", text)
-    return len(text.split())
 
 
 def comment(gh: GitHub, number: int, workdir: Path, run_url: str) -> int:
