@@ -67,8 +67,9 @@ jobs:
 
 ### `pr-risk.yml`
 
-Shadow-mode risk check for small PRs. When a PR is opened or marked ready, and on every push, it leaves one
-comment saying whether the PR would have been auto-approved and why. It never approves.
+Shadow-mode risk check for small PRs. When a PR is opened or marked ready, and on every push,
+it leaves one comment saying whether the PR would have been auto-approved and why. It never
+approves.
 
 These PRs are skipped with no comment: drafts, fork PRs, PRs over 50 changed lines, and PRs
 that touch a deny-listed path. The defaults live in `scripts/pr_risk.py`, and callers can add
