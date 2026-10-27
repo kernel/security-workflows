@@ -160,7 +160,8 @@ def deny_patterns(extra: str) -> list[str]:
     return list(DEFAULT_DENY_PATHS) + [line for line in lines if line and not line.startswith("#")]
 
 
-def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns: list[str]) -> str | None:
+def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns: list[str],
+                      association: str) -> str | None:
     if pr.get("draft"):
         return "draft PR"
     head_repo = (pr["head"].get("repo") or {}).get("full_name")
@@ -168,7 +169,9 @@ def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns:
         return "PR comes from a fork"
     # Only org members' own changes are candidates. Bots are never members, so their PRs are
     # skipped too: no person wrote them, and approving them unread is a separate decision.
-    if pr.get("author_association") not in ("OWNER", "MEMBER"):
+    # The association comes from the event payload: the API answers for the caller's token,
+    # and the workflow token cannot see private org membership, so it reports CONTRIBUTOR.
+    if association not in ("OWNER", "MEMBER"):
         return "author is not an org member"
     changed = pr["additions"] + pr["deletions"]
     if changed > MAX_CHANGED_LINES:
@@ -280,12 +283,12 @@ def previous_data(body: str) -> dict[str, Any] | None:
         return None
 
 
-def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any]:
+def gather(gh: GitHub, number: int, extra_deny: str, association: str, out: Path) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
     pr = gh.pull(number)
     files = gh.files(number)
     existing = find_comment(gh.comments(number))
-    reason = ineligible_reason(pr, files, deny_patterns(extra_deny))
+    reason = ineligible_reason(pr, files, deny_patterns(extra_deny), association)
     gate = {
         "sha": pr["head"]["sha"],
         "eligible": reason is None,
@@ -436,7 +439,7 @@ def main() -> int:
         return 0
     gh = GitHub(args.repo)
     if args.cmd == "gather":
-        gather(gh, args.number, os.environ.get("DENY_PATHS", ""), args.dir)
+        gather(gh, args.number, os.environ.get("DENY_PATHS", ""), os.environ["AUTHOR_ASSOCIATION"], args.dir)
         return 0
     return comment(gh, args.number, args.dir, os.environ.get("RUN_URL", ""))
 
