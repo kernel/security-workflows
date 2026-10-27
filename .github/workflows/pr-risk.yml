@@ -1,0 +1,110 @@
+name: PR Risk
+
+# Shadow-mode risk check for small pull requests. Comments whether the PR would have been
+# auto-approved and why; it never approves, so a human review is still what merges a PR.
+#
+# A PR is skipped, with no comment, when it is a draft, comes from a fork, changes more than
+# 50 lines, or touches a deny-listed path (defaults in scripts/pr_risk.py plus the caller's
+# `deny-paths`). Otherwise Claude classifies the diff and may deny it on its own judgment.
+# If a PR that already has a comment becomes ineligible on a later push, the comment is
+# rewritten so it never shows a stale "yes".
+#
+# Credentials are split by step. The model runs with no tools and no GitHub token, reading
+# only the PR data gathered with the caller's read-only token. The kernel-internal token is
+# minted after the model has finished, scoped to this repo and to pull-request writes.
+
+on:
+  workflow_call:
+    inputs:
+      deny-paths:
+        description: Extra glob patterns, one per line, that make a PR ineligible
+        type: string
+        required: false
+        default: ''
+      security-workflows-ref:
+        description: Ref of kernel/security-workflows to fetch the classifier script and prompt from
+        type: string
+        required: false
+        default: main
+    # Named rather than inherited: `secrets: inherit` would hand this cross-repo workflow
+    # every secret the caller holds.
+    secrets:
+      ADMIN_APP_ID:
+        required: true
+      ADMIN_APP_PRIVATE_KEY:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  classify:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    concurrency:
+      group: pr-risk-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      WORKDIR: /tmp/pr-risk
+    steps:
+      - name: Fetch classifier
+        env:
+          REF: ${{ inputs.security-workflows-ref }}
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/kernel/security-workflows/$REF"
+          curl -fsSL "$base/scripts/pr_risk.py" -o /tmp/pr_risk.py
+          curl -fsSL "$base/.github/workflows/pr-risk/classify-prompt.md" -o /tmp/pr-risk-prompt.md
+
+      - name: Gather
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DENY_PATHS: ${{ inputs.deny-paths }}
+        run: python3 /tmp/pr_risk.py gather --repo "$REPO" --number "$NUMBER" --dir "$WORKDIR"
+
+      - name: Install Claude Code CLI
+        if: steps.gather.outputs.eligible == 'true'
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Classify
+        if: steps.gather.outputs.eligible == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }}
+        run: |
+          set -euo pipefail
+          # An empty directory, so no CLAUDE.md or project settings are picked up.
+          mkdir -p "$WORKDIR/cwd" && cd "$WORKDIR/cwd"
+          claude -p ${MODEL:+--model "$MODEL"} \
+            --tools "" --strict-mcp-config \
+            --system-prompt-file /tmp/pr-risk-prompt.md \
+            --json-schema "$(python3 /tmp/pr_risk.py schema)" \
+            --output-format json --max-budget-usd 1 \
+            < "$WORKDIR/input.md" > "$WORKDIR/result.json"
+
+      - name: Generate app token
+        id: app-token
+        if: ${{ !cancelled() && (steps.gather.outputs.eligible == 'true' || steps.gather.outputs.commented == 'true') }}
+        # Pinned to a commit because this step is handed the app's private key. d72941d is v1.12.0.
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+
+      - name: Comment
+        if: ${{ !cancelled() && steps.app-token.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 /tmp/pr_risk.py comment --repo "$REPO" --number "$NUMBER" --dir "$WORKDIR"

@@ -1,0 +1,31 @@
+name: PR Risk Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/pr-risk.yml
+      - .github/workflows/pr-risk-tests.yml
+      - .github/workflows/pr-risk/**
+      - scripts/pr_risk.py
+      - scripts/test_pr_risk.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/pr-risk.yml
+      - .github/workflows/pr-risk-tests.yml
+      - .github/workflows/pr-risk/**
+      - scripts/pr_risk.py
+      - scripts/test_pr_risk.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: |
+          python3 -m venv /tmp/pr-risk-tests
+          /tmp/pr-risk-tests/bin/pip install PyYAML==6.0.3
+          /tmp/pr-risk-tests/bin/python -m unittest discover -s scripts -p test_pr_risk.py

@@ -65,6 +65,37 @@ jobs:
     secrets: inherit
 ```
 
+### `pr-risk.yml`
+
+Shadow-mode risk check for small PRs. On `ready_for_review` and every push, it leaves one
+comment saying whether the PR would have been auto-approved and why. It never approves.
+
+These PRs are skipped with no comment: drafts, fork PRs, PRs over 50 changed lines, and PRs
+that touch a deny-listed path. The defaults live in `scripts/pr_risk.py`, and callers can add
+more through `deny-paths`. Claude classifies everything else and can deny a PR on its own
+judgment. The comment stores its verdict in a hidden `pr-risk:v1` JSON marker for later analysis.
+
+```yaml
+# In your repo's .github/workflows/pr-risk.yml
+name: PR Risk
+on:
+  pull_request:
+    types: [ready_for_review, synchronize]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  classify:
+    uses: kernel/security-workflows/.github/workflows/pr-risk.yml@main
+    with:
+      deny-paths: |
+        packages/db/**
+    secrets:
+      ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
+      ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
 ## Enrollment
 
 Enroll repositories that process, store, transmit, or can materially affect production customer data or production operations. Examples include application services, data pipelines, infrastructure-as-code, deployment tooling, internal admin tools, and customer-facing dashboards.
@@ -98,7 +129,7 @@ projectIgnorePaths:
 
 Consumer repos need these secrets (set at org or repo level):
 
-- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Claude Code)
+- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Claude Code)
 - `CURSOR_API_KEY` — for the other fix/remediation agents (Cursor)
 - `ADMIN_APP_ID` + `ADMIN_APP_PRIVATE_KEY` — GitHub App for write access
 - `SOCKET_API_TOKEN` — Socket.dev API token
@@ -107,5 +138,5 @@ Consumer repos need these secrets (set at org or repo level):
 
 Consumer repos need these variables (set at org or repo level):
 
-- `CLAUDE_CODE_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent (Claude Code)
+- `CLAUDE_CODE_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Claude Code)
 - `CURSOR_PREFERRED_MODEL` — model for the other Cursor agent invocations
