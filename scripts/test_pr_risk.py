@@ -1,8 +1,10 @@
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -11,6 +13,26 @@ import pr_risk  # noqa: E402
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/pr-risk.yml"
+
+# Stands in for `gh api`: records each call and its stdin, and answers from canned responses.
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+log = Path(os.environ["FAKE_GH_LOG"])
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append({"args": sys.argv[1:], "stdin": sys.stdin.read() if "--input" in sys.argv else None})
+log.write_text(json.dumps(calls))
+path = next(a for a in sys.argv if a.startswith("/repos/"))
+if "/contents/missing" in path:
+    print("gh: Not Found (HTTP 404)", file=sys.stderr)
+    sys.exit(1)
+if "/contents/" in path:
+    print("raw file", end="")
+elif "--slurp" in sys.argv:
+    print(json.dumps([[{"n": 1}, {"n": 2}], [{"n": 3}]]))
+else:
+    print("{}")
+'''
 
 PATCH = "@@ -10,3 +10,4 @@ flags:\n   - a\n   - b\n+  - c\n   - d"
 
@@ -212,6 +234,25 @@ class PRRiskTests(unittest.TestCase):
         content = "\n".join("l" for _ in range(2000))
         total = sum(hi - lo + 1 for lo, hi, _ in pr_risk.context_snippets(content, "@@ -1 +1000,900 @@"))
         self.assertEqual(total, pr_risk.MAX_CONTEXT_LINES_PER_FILE)
+
+    def test_github_client_calls_gh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gh").write_text(FAKE_GH)
+            (root / "gh").chmod(0o755)
+            env = {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_GH_LOG": str(root / "log.json")}
+            with mock.patch.dict(os.environ, env):
+                gh = pr_risk.GitHub("kernel/infra")
+                self.assertEqual(gh.comments(7), [{"n": 1}, {"n": 2}, {"n": 3}])
+                self.assertEqual(gh.file_at("dir/a b.yaml", "abc"), "raw file")
+                self.assertIsNone(gh.file_at("missing.yaml", "abc"))
+                gh.update_comment(9, "hello")
+            calls = json.loads((root / "log.json").read_text())
+        self.assertEqual(calls[0]["args"], ["api", "--paginate", "--slurp", "/repos/kernel/infra/issues/7/comments?per_page=100"])
+        self.assertIn("/repos/kernel/infra/contents/dir/a%20b.yaml?ref=abc", calls[1]["args"])
+        self.assertIn("Accept: application/vnd.github.raw", calls[1]["args"])
+        self.assertEqual(calls[3]["args"][:4], ["api", "-X", "PATCH", "/repos/kernel/infra/issues/comments/9"])
+        self.assertEqual(json.loads(calls[3]["stdin"]), {"body": "hello"})
 
     def test_workflow_isolates_the_model(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())

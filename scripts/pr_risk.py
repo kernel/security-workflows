@@ -6,7 +6,7 @@
 Nothing here approves anything: the comment only records whether the PR would have been
 auto-approved, so the call can be checked against what reviewers actually did.
 
-Dependency-free so it runs on the runner's system Python.
+Needs only the standard library and the runner's `gh`.
 """
 
 from __future__ import annotations
@@ -16,10 +16,9 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -85,59 +84,53 @@ VERDICT_SCHEMA = {
 UNTRUSTED_TAGS = re.compile(r"</?\s*(pr_description|repository_guidance|diff|context)\b", re.I)
 
 
+class GitHubError(Exception):
+    pass
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str) -> None:
-        self.token = token
+    """The few API calls this needs, through the runner's `gh`, which reads GH_TOKEN."""
+
+    def __init__(self, repo: str) -> None:
         self.repo = repo
 
-    def request(self, method: str, path: str, body: Any = None, accept: str = "application/vnd.github+json") -> Any:
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(f"https://api.github.com{path}", data=data, method=method, headers={
-            "Accept": accept,
-            "Authorization": f"Bearer {self.token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "kernel-pr-risk",
-        })
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode()
-        if accept.endswith("raw"):
-            return raw
-        return json.loads(raw) if raw else None
+    def api(self, *args: str, body: Any = None) -> str:
+        cmd = ["gh", "api", *args]
+        if body is not None:
+            cmd += ["--input", "-"]
+        result = subprocess.run(cmd, input=json.dumps(body) if body is not None else None,
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise GitHubError(result.stderr.strip())
+        return result.stdout
 
     def paginate(self, path: str) -> list[Any]:
-        items: list[Any] = []
-        sep = "&" if "?" in path else "?"
-        for page in range(1, 31):
-            batch = self.request("GET", f"{path}{sep}per_page=100&page={page}")
-            items.extend(batch)
-            if len(batch) < 100:
-                break
-        return items
+        pages = json.loads(self.api("--paginate", "--slurp", path))
+        return [item for page in pages for item in page]
 
     def pull(self, number: int) -> dict[str, Any]:
-        return self.request("GET", f"/repos/{self.repo}/pulls/{number}")
+        return json.loads(self.api(f"/repos/{self.repo}/pulls/{number}"))
 
     def files(self, number: int) -> list[dict[str, Any]]:
-        return self.paginate(f"/repos/{self.repo}/pulls/{number}/files")
+        return self.paginate(f"/repos/{self.repo}/pulls/{number}/files?per_page=100")
 
     def comments(self, number: int) -> list[dict[str, Any]]:
-        return self.paginate(f"/repos/{self.repo}/issues/{number}/comments")
+        return self.paginate(f"/repos/{self.repo}/issues/{number}/comments?per_page=100")
 
     def file_at(self, path: str, ref: str) -> str | None:
-        quoted = urllib.parse.quote(path)
         try:
-            return self.request("GET", f"/repos/{self.repo}/contents/{quoted}?ref={ref}",
-                                accept="application/vnd.github.raw")
-        except urllib.error.HTTPError as err:
-            if err.code in (403, 404):
+            return self.api("-H", "Accept: application/vnd.github.raw",
+                            f"/repos/{self.repo}/contents/{urllib.parse.quote(path)}?ref={ref}")
+        except GitHubError as err:
+            if "HTTP 403" in str(err) or "HTTP 404" in str(err):
                 return None
             raise
 
     def create_comment(self, number: int, body: str) -> None:
-        self.request("POST", f"/repos/{self.repo}/issues/{number}/comments", {"body": body})
+        self.api("-X", "POST", f"/repos/{self.repo}/issues/{number}/comments", body={"body": body})
 
     def update_comment(self, comment_id: int, body: str) -> None:
-        self.request("PATCH", f"/repos/{self.repo}/issues/comments/{comment_id}", {"body": body})
+        self.api("-X", "PATCH", f"/repos/{self.repo}/issues/comments/{comment_id}", body={"body": body})
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -443,7 +436,7 @@ def main() -> int:
     if args.cmd == "schema":
         print(json.dumps(VERDICT_SCHEMA))
         return 0
-    gh = GitHub(os.environ["GH_TOKEN"], args.repo)
+    gh = GitHub(args.repo)
     if args.cmd == "gather":
         gather(gh, args.number, os.environ.get("DENY_PATHS", ""), args.dir)
         return 0
