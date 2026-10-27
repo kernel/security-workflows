@@ -38,10 +38,11 @@ else:
 PATCH = "@@ -10,3 +10,4 @@ flags:\n   - a\n   - b\n+  - c\n   - d"
 
 
-def pr(additions=1, deletions=0, draft=False, fork=False, sha="abc1234def"):
+def pr(additions=1, deletions=0, draft=False, fork=False, sha="abc1234def", association="MEMBER"):
     return {
         "number": 7, "draft": draft, "title": "Add an org to a flag", "body": "Adds one org.",
-        "user": {"login": "someone"}, "additions": additions, "deletions": deletions,
+        "user": {"login": "someone"}, "author_association": association,
+        "additions": additions, "deletions": deletions,
         "head": {"sha": sha, "repo": {"full_name": "external/infra" if fork else "kernel/infra"}},
         "base": {"sha": "base000", "ref": "main", "repo": {"full_name": "kernel/infra"}},
     }
@@ -131,6 +132,8 @@ class PRRiskTests(unittest.TestCase):
         cases = {
             "draft": (pr(draft=True), [file()]),
             "fork": (pr(fork=True), [file()]),
+            "not an org member": (pr(association="CONTRIBUTOR"), [file()]),
+            "author is not an org member": (pr(association="NONE"), [file()]),
             "51 changed lines": (pr(additions=30, deletions=21), [file()]),
             "deny list (`identity/**`)": (pr(), [file("identity/access.go")]),
             "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")]),
@@ -141,6 +144,7 @@ class PRRiskTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, pr_risk.ineligible_reason(p, files, patterns))
         self.assertIsNone(pr_risk.ineligible_reason(pr(additions=25, deletions=25), [file()], patterns))
+        self.assertIsNone(pr_risk.ineligible_reason(pr(association="OWNER"), [file()], patterns))
 
     def test_ineligible_without_comment_is_silent(self):
         gh = FakeGitHub(pr(additions=200), [file()])

@@ -166,6 +166,10 @@ def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns:
     head_repo = (pr["head"].get("repo") or {}).get("full_name")
     if head_repo != pr["base"]["repo"]["full_name"]:
         return "PR comes from a fork"
+    # Only org members' own changes are candidates. Bots are never members, so their PRs are
+    # skipped too: no person wrote them, and approving them unread is a separate decision.
+    if pr.get("author_association") not in ("OWNER", "MEMBER"):
+        return "author is not an org member"
     changed = pr["additions"] + pr["deletions"]
     if changed > MAX_CHANGED_LINES:
         return f"{changed} changed lines (limit {MAX_CHANGED_LINES})"
