@@ -191,13 +191,15 @@ jobs:
             remediation-context.json
             socket-fix-plan.json
 
+  # Runs Socket's fix with Socket and a read-only GitHub token. Never runs the agent.
   fix:
     needs: triage
     runs-on: ubuntu-latest
     outputs:
-      publish: ${{ steps.result.outputs.publish }}
       base_sha: ${{ steps.branch.outputs.base_sha }}
       update_sha: ${{ steps.branch.outputs.update_sha }}
+      has_changes: ${{ steps.snapshot.outputs.has_changes }}
+      run_agent: ${{ steps.snapshot.outputs.run_agent }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -236,7 +238,6 @@ jobs:
           fi
           git checkout -B security/vuln-remediation origin/main
 
-      # Read-only and scoped to this repository. Revoked before the agent runs.
       - name: Generate private module read token
         id: read-token
         if: steps.check.outputs.skip != 'true'
@@ -276,18 +277,11 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.setup-python
         run: pip install uv
 
-      - name: Setup Node
-        if: steps.check.outputs.skip != 'true'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '22'
-
       - name: Install Socket CLI
         if: steps.check.outputs.skip != 'true'
         run: npm install -g @socketsecurity/cli
 
       - name: Apply Socket fixes
-        id: socket-fix
         if: steps.check.outputs.skip != 'true'
         timeout-minutes: 10
         env:
@@ -311,28 +305,145 @@ jobs:
             echo "::warning::Socket fix failed; invoking bounded fallback agent."
           fi
 
-          if git diff --quiet; then
+      - name: Snapshot Socket changes
+        id: snapshot
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          WORK="$RUNNER_TEMP/remediation"
+          git add -u
+          git diff --cached --name-only --no-renames > "$WORK/changed-files.txt"
+          git diff --cached --binary --no-renames --no-ext-diff --no-textconv > "$WORK/changes.patch"
+          if [ -s "$WORK/changed-files.txt" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
             echo "run_agent=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Revoke private module read token
-        if: always() && steps.read-token.outcome == 'success'
+      # The agent job has no GitHub credentials, so hand it the private Go
+      # modules it may need as a module cache subtree.
+      - name: Download private Go modules
+        if: steps.snapshot.outputs.run_agent == 'true' && inputs.go-version-file != ''
         env:
-          GH_TOKEN: ${{ steps.read-token.outputs.token }}
-        run: gh api --method DELETE /installation/token
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.read-token.outputs.token }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+          GOPRIVATE: github.com/kernel/*
+        run: |
+          jq -r '.fixes[].manifests[]? | select(endswith("go.mod") or endswith("go.sum"))' \
+            "$RUNNER_TEMP/remediation/remediation-context.json" \
+            | xargs -r -n1 dirname | sort -u | while read -r dir; do
+              go -C "$dir" mod download || echo "::warning::Could not download Go modules for $dir"
+            done
+          MODULES="$(go env GOMODCACHE)/cache/download/github.com/kernel"
+          mkdir -p "$MODULES"
+          tar -czf "$RUNNER_TEMP/go-private-modules.tgz" -C "$MODULES" .
+
+      - name: Upload private Go modules
+        if: steps.snapshot.outputs.run_agent == 'true' && inputs.go-version-file != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: go-private-modules
+          path: ${{ runner.temp }}/go-private-modules.tgz
+          retention-days: 1
+
+      - name: Upload Socket changes
+        if: steps.snapshot.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: remediation-patch
+          path: |
+            ${{ runner.temp }}/remediation/changes.patch
+            ${{ runner.temp }}/remediation/changed-files.txt
+
+      - name: Upload Socket fix output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: socket-fix-apply
+          path: ${{ runner.temp }}/remediation/socket-fix-apply.json
+          if-no-files-found: ignore
+
+  # Runs the fallback agent when Socket left no diff. This job must reference no
+  # secrets other than the model API keys: every secret a job references is in
+  # runner memory for the whole job, where the agent could read it.
+  agent:
+    needs: fix
+    if: needs.fix.outputs.run_agent == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.snapshot.outputs.has_changes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.fix.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Download triage results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: triage-result
+          path: ${{ runner.temp }}/remediation
+
+      - name: Reset remediation branch to main
+        run: git checkout -B security/vuln-remediation
+
+      - name: Setup Go
+        if: inputs.go-version-file != ''
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: false
+        env:
+          GOPRIVATE: github.com/kernel/*
+
+      - name: Download private Go modules
+        if: inputs.go-version-file != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: go-private-modules
+          path: ${{ runner.temp }}
+
+      - name: Restore private Go modules
+        if: inputs.go-version-file != ''
+        run: |
+          MODULES="$(go env GOMODCACHE)/cache/download/github.com/kernel"
+          mkdir -p "$MODULES"
+          tar -xzf "$RUNNER_TEMP/go-private-modules.tgz" -C "$MODULES"
+
+      - name: Setup Bun
+        if: inputs.setup-bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
+
+      - name: Install JS dependencies
+        if: inputs.setup-bun
+        run: bun install
+
+      - name: Setup Python
+        if: inputs.setup-python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        if: inputs.setup-python
+        run: pip install uv
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
 
       - name: Install Pi
-        if: steps.socket-fix.outputs.run_agent == 'true'
         env:
           PI_TELEMETRY: '0'
         run: |
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
-      # The agent has no GitHub credentials. Later steps validate its diff and
-      # the pr job publishes it.
       - name: Run fallback agent
-        if: steps.socket-fix.outputs.run_agent == 'true'
         timeout-minutes: 20
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -353,33 +464,70 @@ jobs:
             --model "$PI_PREFERRED_MODEL" --thinking max \
             @"$RUNNER_TEMP/fix-prompt.md"
 
-      - name: Snapshot remediation diff
-        id: diff
-        if: steps.check.outputs.skip != 'true'
+      - name: Snapshot agent changes
+        id: snapshot
         env:
-          AGENT_BASE: ${{ steps.branch.outputs.base_sha }}
+          AGENT_BASE: ${{ needs.fix.outputs.base_sha }}
         run: |
           WORK="$RUNNER_TEMP/remediation"
-          # Capture tracked changes, committed or not, against the pre-agent base,
-          # then validate only that patch on a clean tree.
+          # Capture tracked changes, committed or not, against the pre-agent base.
           git reset -q --soft "$AGENT_BASE"
           git add -u
           git diff --cached --name-only --no-renames > "$WORK/changed-files.txt"
           git diff --cached --binary --no-renames --no-ext-diff --no-textconv > "$WORK/changes.patch"
-          git reset -q --hard
-          git clean -fdq
-          if [ ! -s "$WORK/changed-files.txt" ]; then
-            echo '{"fixed": [], "reverted": [], "summary": "No dependency changes were produced."}' > "$WORK/fix-result.json"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ -s "$WORK/changed-files.txt" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No dependency changes were produced."
           fi
-          git apply --index "$WORK/changes.patch"
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload agent changes
+        if: steps.snapshot.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: remediation-patch
+          path: |
+            ${{ runner.temp }}/remediation/changes.patch
+            ${{ runner.temp }}/remediation/changed-files.txt
+
+  # Validates and confirms the patch from Socket or the agent on a fresh runner.
+  verify:
+    needs: [fix, agent]
+    if: >-
+      !cancelled() && needs.fix.result == 'success' &&
+      (needs.fix.outputs.has_changes == 'true' ||
+        (needs.agent.result == 'success' && needs.agent.outputs.has_changes == 'true'))
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.result.outputs.publish }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.fix.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Download triage results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: triage-result
+          path: ${{ runner.temp }}/remediation
+
+      - name: Download remediation patch
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remediation-patch
+          path: ${{ runner.temp }}/remediation
 
       - name: Validate remediation diff
-        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
         run: |
           WORK="$RUNNER_TEMP/remediation"
+          git apply --index "$WORK/changes.patch"
+          git diff --cached --name-only --no-renames > "$RUNNER_TEMP/applied-files.txt"
+          if ! cmp -s "$RUNNER_TEMP/applied-files.txt" "$WORK/changed-files.txt"; then
+            echo "::error::The patch does not match its file list."
+            exit 1
+          fi
           curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/scripts/vuln_remediation.py -o /tmp/vuln_remediation.py
           python3 /tmp/vuln_remediation.py validate-diff \
             --repo-root . \
@@ -387,8 +535,10 @@ jobs:
             --changed-files "$WORK/changed-files.txt" \
             --output "$WORK/diff-validation.json"
 
+      - name: Install Socket CLI
+        run: npm install -g @socketsecurity/cli
+
       - name: Build post-fix Socket plan
-        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_API_TOKEN }}
         run: |
@@ -409,7 +559,6 @@ jobs:
           fi
 
       - name: Confirm fixes
-        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
         run: |
           WORK="$RUNNER_TEMP/remediation"
           set +e
@@ -428,7 +577,6 @@ jobs:
 
       - name: Check for confirmed fixes
         id: result
-        if: steps.check.outputs.skip != 'true' && steps.diff.outputs.has_changes == 'true'
         run: |
           if jq -e '.fixed | length > 0' "$RUNNER_TEMP/remediation/fix-result.json" >/dev/null; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -447,14 +595,15 @@ jobs:
             ${{ runner.temp }}/remediation/diff-validation.json
             ${{ runner.temp }}/remediation/changed-files.txt
             ${{ runner.temp }}/remediation/changes.patch
-            ${{ runner.temp }}/remediation/socket-fix-apply.json
             ${{ runner.temp }}/remediation/post-fix-plan.json
           if-no-files-found: ignore
 
   # Publishes the validated patch. Never runs repository code, package managers, or the agent.
   pr:
-    needs: [triage, fix]
-    if: needs.fix.outputs.publish == 'true'
+    needs: [triage, fix, verify]
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     env:
       UPDATE_SHA: ${{ needs.fix.outputs.update_sha }}

@@ -37,7 +37,7 @@ go mod tidy
 ```
 If no target version is available, do not guess; record the fix as reverted with reason `No Socket target version available for fallback`.
 
-Private `github.com/kernel/*` modules cannot be downloaded. If a fix needs one, revert it and record the download error as the reason.
+Private `github.com/kernel/*` modules that are not already in the Go module cache cannot be downloaded. If a fix needs one, revert it and record the download error as the reason.
 
 ### npm (`package.json` / `package-lock.json` / `pnpm-lock.yaml`)
 
