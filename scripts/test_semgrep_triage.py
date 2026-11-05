@@ -1,7 +1,9 @@
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -57,17 +59,79 @@ class CommentableLinesTest(unittest.TestCase):
         self.assertEqual(semgrep_triage.commentable_lines(files), {"a.go": [[1, 4], [21, 22]]})
 
 
+def git(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class FindingsOnHeadTest(unittest.TestCase):
+    def test_old_line(self):
+        # Base added 3 lines at 2, replaced 2 lines at 20 with 1, and deleted 2 lines after 30.
+        hunks = [(1, 0, 2, 3), (17, 2, 20, 1), (28, 2, 30, 0)]
+        self.assertEqual(semgrep_triage.old_line(1, hunks), 1)
+        self.assertIsNone(semgrep_triage.old_line(3, hunks))
+        self.assertEqual(semgrep_triage.old_line(10, hunks), 7)
+        self.assertIsNone(semgrep_triage.old_line(20, hunks))
+        self.assertEqual(semgrep_triage.old_line(25, hunks), 23)
+        self.assertEqual(semgrep_triage.old_line(30, hunks), 28)
+        self.assertEqual(semgrep_triage.old_line(31, hunks), 31)
+
+
 class GatherTest(unittest.TestCase):
-    def test_writes_commentable_lines_and_existing_comment_locations(self):
-        gh = FakeGitHub(files=[{"filename": "a.go", "patch": "@@ -1 +1,2 @@\n+x"}],
-                        comments=[{"path": "a.go", "line": 2, "original_line": 2,
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "repo"
+        self.root.mkdir()
+        git(self.root, "init", "-q", "-b", "main")
+        git(self.root, "config", "user.email", "test@example.com")
+        git(self.root, "config", "user.name", "Test")
+        self.write(["def ping(host):", "    return host", "", "", "def other():", "    pass"])
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "base")
+        git(self.root, "switch", "-qc", "pr")
+        self.write(["def ping(host):", "    return run(host, shell=True)", "", "", "def other():", "    pass"])
+        git(self.root, "commit", "-qam", "pr")
+        self.head = git(self.root, "rev-parse", "HEAD")
+        git(self.root, "switch", "-q", "main")
+        self.write(["import subprocess", "", "", "def ping(host):", "    return host", "", "", "def other():",
+                    "    subprocess.run(other, shell=True)"])
+        git(self.root, "commit", "-qam", "main moved on")
+        # GitHub's refs/pull/N/merge: base as first parent, PR head as second.
+        git(self.root, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        self.assertEqual(git(self.root, "rev-parse", "HEAD^2"), self.head)
+
+    def write(self, lines):
+        (self.root / "app.py").write_text("\n".join(lines) + "\n")
+
+    def finding(self, line):
+        return {"path": "app.py", "check_id": "shell",
+                "start": {"line": line, "col": 5}, "end": {"line": line, "col": 9}}
+
+    def test_moves_findings_onto_the_pr_head_and_writes_pr_context(self):
+        merge_lines = (self.root / "app.py").read_text().splitlines()
+        self.assertEqual(merge_lines[4], "    return run(host, shell=True)")
+        results = self.root / "semgrep-results.json"
+        # Line 5 is the PR's change; line 9 only exists because the base branch added it.
+        results.write_text(json.dumps({"results": [self.finding(5), self.finding(9)], "errors": []}))
+        patch = "@@ -1,2 +1,2 @@\n def ping(host):\n-    return host\n+    return run(host, shell=True)"
+        gh = FakeGitHub(files=[{"filename": "app.py", "patch": patch}],
+                        comments=[{"path": "app.py", "line": 2, "original_line": 2,
                                    "user": {"login": "cursor[bot]"}, "body": "not passed on"}])
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "triage"
-            semgrep_triage.gather(gh, 7, out)
-            self.assertEqual(json.loads((out / "commentable-lines.json").read_text()), {"a.go": [[1, 2]]})
-            self.assertEqual(json.loads((out / "existing-comments.json").read_text()),
-                             [{"path": "a.go", "line": 2, "original_line": 2, "author": "cursor[bot]"}])
+        out = self.root.parent / "triage"
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            semgrep_triage.gather(gh, 7, out, results, self.head)
+        finally:
+            os.chdir(cwd)
+        moved = json.loads(results.read_text())
+        self.assertEqual(moved["errors"], [])
+        self.assertEqual([(f["start"]["line"], f["end"]["line"]) for f in moved["results"]], [(2, 2)])
+        head_lines = git(self.root, "show", f"{self.head}:app.py").splitlines()
+        self.assertEqual(head_lines[1], "    return run(host, shell=True)")
+        self.assertEqual(json.loads((out / "commentable-lines.json").read_text()), {"app.py": [[1, 2]]})
+        self.assertEqual(json.loads((out / "existing-comments.json").read_text()),
+                         [{"path": "app.py", "line": 2, "original_line": 2, "author": "cursor[bot]"}])
 
 
 class ParseResultTest(unittest.TestCase):
@@ -180,6 +244,15 @@ class WorkflowTest(unittest.TestCase):
     def test_checkout_does_not_persist_the_token(self):
         checkout = self.step("Checkout repository")
         self.assertIs(checkout["with"]["persist-credentials"], False)
+
+    def test_findings_move_to_the_pr_head_that_comments_are_posted_on(self):
+        job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["triage"]
+        self.assertEqual(job["env"]["HEAD_SHA"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(self.step("Checkout repository")["with"]["fetch-depth"], 2)
+        gather = self.step("Gather PR comments")["run"]
+        self.assertIn('--head "$HEAD_SHA"', gather)
+        self.assertLess(gather.index(" gather "), gather.index('git checkout -q --detach "$HEAD_SHA"'))
+        self.assertIn('--head "$HEAD_SHA"', self.step("Post review")["run"])
 
     def test_only_runner_steps_get_the_token_and_model_keys_stay_in_the_agent_step(self):
         for step in self.steps:

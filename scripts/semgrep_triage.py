@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """GitHub side of the Semgrep triage agent, run by semgrep.yml.
 
-`gather` writes the PR's commentable lines and existing inline comments for the agent to read.
+`gather` moves the Semgrep findings from the merge commit Semgrep scanned onto the PR head, which
+is what review comments are placed on, and writes the PR's commentable lines and existing inline
+comments for the agent to read.
 `post` checks the agent's JSON result against the Semgrep findings, the PR diff, and the
 comments already on the PR, then posts the remaining comments as one review.
 
@@ -68,13 +70,64 @@ def commentable_lines(files: list[dict[str, Any]]) -> dict[str, list[list[int]]]
     return lines
 
 
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def diff_hunks(diff: str) -> dict[str, list[tuple[int, int, int, int]]]:
+    """(old start, old length, new start, new length) of each hunk in a `git diff -U0`, by new path."""
+    hunks: dict[str, list[tuple[int, int, int, int]]] = {}
+    path = None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else None
+        elif path and (m := HUNK_RE.match(line)):
+            a, b, c, d = m.groups()
+            hunks.setdefault(path, []).append((int(a), int(b or 1), int(c), int(d or 1)))
+    return hunks
+
+
+def old_line(line: int, hunks: list[tuple[int, int, int, int]]) -> int | None:
+    """Where a line of the diff's new side sits on its old side; None if the diff added it."""
+    shift = 0
+    for a, b, c, d in hunks:
+        if d and c <= line < c + d:
+            return None
+        if (c + d - 1 if d else c) < line:
+            shift += b - d
+    return line + shift
+
+
+def findings_on_head(results: dict[str, Any], head: str) -> dict[str, Any]:
+    """Move findings from the merge commit in the working tree onto the PR head.
+
+    The base branch can change the same files as the PR, so a line number in the merge commit
+    can differ from the head's. Findings on lines that only the base branch added are dropped,
+    since the PR does not touch them and they cannot be commented on.
+    """
+    paths = sorted({f["path"] for f in results.get("results", [])})
+    diff = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "-U0", "--no-renames",
+                           "--no-ext-diff", "--no-textconv", head, "HEAD", "--", *paths],
+                          capture_output=True, text=True, check=True).stdout
+    hunks = diff_hunks(diff)
+    kept = []
+    for f in results.get("results", []):
+        start = old_line(f["start"]["line"], hunks.get(f["path"], []))
+        if start is None:
+            continue
+        end = old_line(f["end"]["line"], hunks.get(f["path"], [])) or start
+        kept.append({**f, "start": {**f["start"], "line": start},
+                     "end": {**f["end"], "line": max(start, end)}})
+    return {**results, "results": kept}
+
+
 def comment_locations(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"path": c["path"], "line": c.get("line"), "original_line": c.get("original_line"),
              "author": (c.get("user") or {}).get("login")} for c in comments]
 
 
-def gather(gh: GitHub, number: int, out: Path) -> None:
+def gather(gh: GitHub, number: int, out: Path, results: Path, head: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
+    results.write_text(json.dumps(findings_on_head(json.loads(results.read_text()), head)))
     (out / "commentable-lines.json").write_text(json.dumps(commentable_lines(gh.files(number)), indent=1))
     (out / "existing-comments.json").write_text(json.dumps(comment_locations(gh.review_comments(number)), indent=1))
 
@@ -148,15 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--repo", required=True)
         p.add_argument("--number", type=int, required=True)
         p.add_argument("--dir", type=Path, required=True)
-        if name == "post":
-            p.add_argument("--commit", required=True)
-            p.add_argument("--results", type=Path, required=True)
+        p.add_argument("--results", type=Path, required=True)
+        p.add_argument("--head", required=True)
     args = parser.parse_args(argv)
     gh = GitHub(args.repo)
     if args.command == "gather":
-        gather(gh, args.number, args.dir)
+        gather(gh, args.number, args.dir, args.results, args.head)
         return 0
-    return post(gh, args.number, args.commit, args.dir, args.results)
+    return post(gh, args.number, args.head, args.dir, args.results)
 
 
 if __name__ == "__main__":

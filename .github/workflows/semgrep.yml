@@ -96,10 +96,14 @@ jobs:
     env:
       REPO: ${{ github.repository }}
       NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      # Semgrep scanned the merge commit, but review comments go on the PR head. Depth 2 fetches
+      # both, so the findings can be moved onto the head before the agent reads it.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Download results
@@ -117,7 +121,10 @@ jobs:
       - name: Gather PR comments
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 "$RUNNER_TEMP/semgrep_triage.py" gather --repo "$REPO" --number "$NUMBER" --dir "$TRIAGE_DIR"
+        run: |
+          python3 "$RUNNER_TEMP/semgrep_triage.py" gather --repo "$REPO" --number "$NUMBER" \
+            --head "$HEAD_SHA" --dir "$TRIAGE_DIR" --results semgrep-results.json
+          git checkout -q --detach "$HEAD_SHA"
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -155,7 +162,6 @@ jobs:
       - name: Post review
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 "$RUNNER_TEMP/semgrep_triage.py" post --repo "$REPO" --number "$NUMBER" \
-            --commit "$HEAD_SHA" --dir "$TRIAGE_DIR" --results semgrep-results.json
+            --head "$HEAD_SHA" --dir "$TRIAGE_DIR" --results semgrep-results.json
