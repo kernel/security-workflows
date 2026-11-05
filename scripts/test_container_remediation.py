@@ -92,6 +92,10 @@ class ContainerRemediationTests(unittest.TestCase):
             self.assertIs(self.step(job, "Setup Go")["with"]["cache"], False)
         self.assertEqual(self.jobs["fix"]["needs"], ["triage", "go-modules"])
         self.assertIn("needs.go-modules.result == 'skipped'", self.jobs["fix"]["if"])
+        self.assertEqual(self.step("go-modules", "Checkout repository")["with"]["ref"], "main")
+        self.assertEqual(
+            self.step("fix", "Reset remediation branch to main")["env"]["MODULES_MAIN_SHA"],
+            "${{ needs.go-modules.outputs.main_sha }}")
         fetch = self.step("fix", "Download private Go modules")
         self.assertEqual(fetch["with"]["name"], upload["with"]["name"])
         self.assertLess(
@@ -239,6 +243,19 @@ class ShellStepTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         copied = cache / "cache/download/github.com/kernel/hypeman-go/@v/v0.27.0.zip"
         self.assertEqual(copied.read_text(), "zip")
+
+    def test_fix_builds_on_the_commit_modules_were_fetched_for(self):
+        (self.repo / "Dockerfile").write_text("FROM alpine:3.21.0\n")
+        git(self.repo, "commit", "-qam", "main moved on")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        newer = git(self.repo, "rev-parse", "HEAD").strip()
+        for modules_sha, expected in ((self.base, self.base), ("", newer)):
+            with self.subTest(modules_sha=modules_sha):
+                result, output = self.run_step(
+                    "fix", "Reset remediation branch to main", MODULES_MAIN_SHA=modules_sha)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f"main_sha={expected}\nupdate_sha=\n")
+                self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), expected)
 
     def test_snapshot_without_publishable_changes(self):
         (self.repo / "api/main.go").write_text("package main\n")

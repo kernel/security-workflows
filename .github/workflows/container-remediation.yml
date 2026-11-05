@@ -157,13 +157,16 @@ jobs:
     timeout-minutes: 15
     outputs:
       private-modules: ${{ steps.go-private.outputs.repos != '' }}
+      main_sha: ${{ steps.go-private.outputs.main_sha }}
     env:
       GOPRIVATE: github.com/kernel/*
       GO_VERSION_FILE: ${{ inputs.go-version-file }}
     steps:
+      # The fix job builds on this same main commit.
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: main
           persist-credentials: false
 
       - name: Setup Go
@@ -181,6 +184,7 @@ jobs:
             | map(select(startswith("github.com/kernel/")) | split("/")[2])
             | unique | join(",")')
           echo "repos=$repos" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Generate Go module read token
         id: module-token
@@ -253,10 +257,14 @@ jobs:
 
       - name: Reset remediation branch to main
         id: prepare
+        env:
+          MODULES_MAIN_SHA: ${{ needs.go-modules.outputs.main_sha }}
         run: |
-          echo "main_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+          # Private modules were fetched for go-modules' main commit, which may trail origin/main.
+          main_sha=${MODULES_MAIN_SHA:-$(git rev-parse origin/main)}
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
           echo "update_sha=$(git rev-parse -q --verify refs/remotes/origin/security/container-remediation || true)" >> "$GITHUB_OUTPUT"
-          git checkout -B security/container-remediation origin/main
+          git checkout -B security/container-remediation "$main_sha"
 
       - name: Fetch fix prompt and path allowlist
         env:
