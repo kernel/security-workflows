@@ -98,6 +98,11 @@ class WorkflowCredentialBoundary(unittest.TestCase):
             jobs = load_jobs(text.replace(anchor, anchor + f"          LEAK: ${{{{ secrets.{leaked} }}}}\n"))
             self.assertNotEqual(secrets_of(jobs["agent"]), MODEL_KEYS)
 
+    def test_remediation_jobs_have_timeouts(self):
+        for name in ("fix", "agent", "verify", "pr"):
+            self.assertIsInstance(JOBS[name].get("timeout-minutes"), int, name)
+        self.assertGreater(JOBS["agent"]["timeout-minutes"], step("agent", "Run fallback agent")["timeout-minutes"])
+
     def test_agent_job_does_not_save_caches(self):
         self.assertIs(step("agent", "Setup Go")["with"]["cache"], False)
         self.assertIs(step("agent", "Setup Bun")["with"]["no-cache"], True)

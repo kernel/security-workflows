@@ -195,6 +195,7 @@ jobs:
   fix:
     needs: triage
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       base_sha: ${{ steps.branch.outputs.base_sha }}
       update_sha: ${{ steps.branch.outputs.update_sha }}
@@ -370,6 +371,7 @@ jobs:
     needs: fix
     if: needs.fix.outputs.run_agent == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
       has_changes: ${{ steps.snapshot.outputs.has_changes }}
     steps:
@@ -498,6 +500,7 @@ jobs:
       (needs.fix.outputs.has_changes == 'true' ||
         (needs.agent.result == 'success' && needs.agent.outputs.has_changes == 'true'))
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       publish: ${{ steps.result.outputs.publish }}
     steps:
@@ -605,6 +608,7 @@ jobs:
       !cancelled() && needs.verify.result == 'success' &&
       needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       UPDATE_SHA: ${{ needs.fix.outputs.update_sha }}
     steps:
