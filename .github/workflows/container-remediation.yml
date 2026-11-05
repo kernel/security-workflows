@@ -7,7 +7,8 @@ name: Container Vulnerability Remediation
 # Modeled after vuln-remediation.yml (Socket SCA), but for container-level
 # findings (OS packages + compiled-in Go deps).
 #
-# The agent never holds GitHub write credentials. The fix job runs Pi, keeps
+# The agent never holds GitHub credentials. The go-modules job fetches private
+# Go modules ahead of it. The fix job runs Pi with only the model API keys, keeps
 # only go.mod, go.sum, and Dockerfile changes, and builds them. The publish job
 # re-checks that patch and only then mints the token that pushes and opens the PR.
 
@@ -144,8 +145,82 @@ jobs:
           path: triage-result.json
         if: always()
 
+  # Every secret a job references stays readable in runner memory for the whole
+  # job, so private modules are fetched here and the agent's job only gets the
+  # model API keys.
+  go-modules:
+    needs: scan
+    if: needs.scan.outputs.has-findings == 'true' && inputs.go-version-file != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      private-modules: ${{ steps.go-private.outputs.repos != '' }}
+    env:
+      GOPRIVATE: github.com/kernel/*
+      GO_VERSION_FILE: ${{ inputs.go-version-file }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          # Private module sources must not land in the repository's Actions cache.
+          cache: false
+
+      - name: Find private Go modules
+        id: go-private
+        run: |
+          repos=$(go mod edit -json "$GO_VERSION_FILE" | jq -r '
+            [.Require[]?.Path, .Replace[]?.New.Path]
+            | map(select(startswith("github.com/kernel/")) | split("/")[2])
+            | unique | join(",")')
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Go module read token
+        id: module-token
+        if: steps.go-private.outputs.repos != ''
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: kernel
+          repositories: ${{ steps.go-private.outputs.repos }}
+          permission-contents: read
+
+      - name: Download private Go modules
+        id: download
+        if: steps.go-private.outputs.repos != ''
+        env:
+          GH_TOKEN: ${{ steps.module-token.outputs.token }}
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:$GH_TOKEN@github.com/kernel/.insteadOf"
+          export GIT_CONFIG_VALUE_0=https://github.com/kernel/
+          (cd "$(dirname "$GO_VERSION_FILE")" && go mod download)
+          gh api --method DELETE /installation/token
+          echo "dir=$(go env GOMODCACHE)/cache/download/github.com/kernel" >> "$GITHUB_OUTPUT"
+
+      - name: Upload private Go modules
+        if: steps.go-private.outputs.repos != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-remediation-go-modules
+          path: ${{ steps.download.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
   fix:
-    needs: triage
+    needs: [triage, go-modules]
+    # go-modules is skipped when the caller has no Go module.
+    if: >-
+      !cancelled() && needs.triage.result == 'success' &&
+      (needs.go-modules.result == 'success' || needs.go-modules.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -156,7 +231,6 @@ jobs:
       update_sha: ${{ steps.prepare.outputs.update_sha }}
     env:
       GOPRIVATE: github.com/kernel/*
-      GO_VERSION_FILE: ${{ inputs.go-version-file }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -200,43 +274,19 @@ jobs:
           # The agent can write to the module cache, so this job must not save it.
           cache: false
 
-      - name: Find private Go modules
-        id: go-private
-        if: inputs.go-version-file != ''
-        run: |
-          repos=$(go mod edit -json "$GO_VERSION_FILE" | jq -r '
-            [.Require[]?.Path, .Replace[]?.New.Path]
-            | map(select(startswith("github.com/kernel/")) | split("/")[2])
-            | unique | join(",")')
-          echo "repos=$repos" >> "$GITHUB_OUTPUT"
-
-      - name: Generate Go module read token
-        id: module-token
-        if: steps.go-private.outputs.repos != ''
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+      - name: Download private Go modules
+        if: needs.go-modules.outputs.private-modules == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          app-id: ${{ secrets.ADMIN_APP_ID }}
-          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
-          owner: kernel
-          repositories: ${{ steps.go-private.outputs.repos }}
-          permission-contents: read
+          name: container-remediation-go-modules
+          path: ${{ runner.temp }}/go-modules
 
-      # Private modules are fetched before the agent runs; the token is revoked
-      # here, so the agent only sees what is already in the module cache.
-      - name: Download Go modules
-        if: inputs.go-version-file != ''
-        env:
-          GH_TOKEN: ${{ steps.module-token.outputs.token }}
+      - name: Add private Go modules to the module cache
+        if: needs.go-modules.outputs.private-modules == 'true'
         run: |
-          if [[ -n "$GH_TOKEN" ]]; then
-            export GIT_CONFIG_COUNT=1
-            export GIT_CONFIG_KEY_0="url.https://x-access-token:$GH_TOKEN@github.com/kernel/.insteadOf"
-            export GIT_CONFIG_VALUE_0=https://github.com/kernel/
-          fi
-          (cd "$(dirname "$GO_VERSION_FILE")" && go mod download)
-          if [[ -n "$GH_TOKEN" ]]; then
-            gh api --method DELETE /installation/token
-          fi
+          dir="$(go env GOMODCACHE)/cache/download/github.com/kernel"
+          mkdir -p "$dir"
+          cp -R "$RUNNER_TEMP/go-modules/." "$dir/"
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -313,7 +363,8 @@ jobs:
 
   publish:
     needs: fix
-    if: needs.fix.outputs.changed == 'true'
+    # A skipped go-modules job would otherwise skip this job too.
+    if: "!cancelled() && needs.fix.result == 'success' && needs.fix.outputs.changed == 'true'"
     runs-on: ubuntu-24.04
     permissions:
       contents: read

@@ -65,19 +65,39 @@ class ContainerRemediationTests(unittest.TestCase):
                 self.assertNotIn("claude", yaml.safe_dump(step))
                 self.assertNotRegex(yaml.safe_dump(step.get("with", {})), r"permission-[\w-]+: write")
 
-    def test_module_token_is_read_only_and_revoked_before_the_agent(self):
-        mint = self.step("fix", "Generate Go module read token")
-        self.assertEqual(mint["with"]["permission-contents"], "read")
+    def test_agent_jobs_reference_only_model_secrets(self):
+        # A job's secrets stay in runner memory for the whole job, where an agent
+        # with sudo can read them, so revoking a minted token is not enough.
+        agent_jobs = {
+            name for name, job in self.jobs.items()
+            if any("pi --print" in s.get("run", "") for s in job["steps"])
+        }
+        self.assertEqual(agent_jobs, {"triage", "fix"})
+        for name in agent_jobs:
+            refs = re.findall(r"\bsecrets\b(?:\.(\w+))?", yaml.safe_dump(self.jobs[name]))
+            self.assertLessEqual(set(refs), {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}, name)
+
+    def test_private_modules_are_fetched_in_a_separate_job(self):
+        mint = self.step("go-modules", "Generate Go module read token")
         self.assertEqual(
-            {k for k in mint["with"] if k.startswith("permission-")}, {"permission-contents"})
-        download = self.step("fix", "Download Go modules")
+            {k: v for k, v in mint["with"].items() if k.startswith("permission-")},
+            {"permission-contents": "read"})
+        self.assertEqual(mint["with"]["repositories"], "${{ steps.go-private.outputs.repos }}")
+        download = self.step("go-modules", "Download private Go modules")
         self.assertEqual(download["env"]["GH_TOKEN"], "${{ steps.module-token.outputs.token }}")
-        self.assertRegex(download["run"], r"gh api --method DELETE /installation/token\n\s*fi\n$")
-        self.assertNotIn("git config", download["run"])
-        self.assertLess(self.index("fix", "Download Go modules"), self.index("fix", "Apply fixes"))
-        self.assertIs(self.step("fix", "Setup Go")["with"]["cache"], False)
-        for step in self.steps("fix")[self.index("fix", "Download Go modules") + 1:]:
-            self.assertNotRegex(yaml.safe_dump(step), TOKEN_REF)
+        upload = self.step("go-modules", "Upload private Go modules")
+        self.assertEqual(upload["with"]["path"], "${{ steps.download.outputs.dir }}")
+        self.assertEqual(upload["with"]["retention-days"], 1)
+        for job in ("go-modules", "fix"):
+            self.assertIs(self.step(job, "Setup Go")["with"]["cache"], False)
+        self.assertEqual(self.jobs["fix"]["needs"], ["triage", "go-modules"])
+        self.assertIn("needs.go-modules.result == 'skipped'", self.jobs["fix"]["if"])
+        fetch = self.step("fix", "Download private Go modules")
+        self.assertEqual(fetch["with"]["name"], upload["with"]["name"])
+        self.assertLess(
+            self.index("fix", "Add private Go modules to the module cache"), self.index("fix", "Apply fixes"))
+        # Default success() also skips this job whenever go-modules was skipped.
+        self.assertIn("!cancelled() && needs.fix.result == 'success'", self.jobs["publish"]["if"])
 
     def test_fix_snapshots_and_validates_after_the_agent(self):
         order = ["Apply fixes", "Snapshot publishable changes", "Verify changes", "Upload validated changes"]
@@ -181,6 +201,45 @@ class ShellStepTests(unittest.TestCase):
         self.assertFalse((self.repo / "evil.sh").exists())
         self.assertEqual(sorted(git(self.repo, "diff", "--cached", "--name-only").split()), ["Dockerfile", "api/go.mod"])
 
+    def stub(self, name, body):
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / name).write_text("#!/usr/bin/env bash\n" + body)
+        (bin_dir / name).chmod(0o755)
+        return f"{bin_dir}:{os.environ['PATH']}"
+
+    def test_module_download_revokes_its_token_and_exports_only_private_modules(self):
+        log = self.root / "calls"
+        self.stub("gh", f'echo "gh $*" >> {log}\n')
+        path = self.stub("go", f'''
+            case "$*" in
+              "env GOMODCACHE") echo "$GOMODCACHE" ;;
+              "mod download") echo "go mod download in $PWD with $GIT_CONFIG_KEY_0" >> {log} ;;
+            esac
+        ''')
+        result, output = self.run_step(
+            "go-modules", "Download private Go modules", PATH=path, GH_TOKEN="ghs_test",
+            GO_VERSION_FILE="api/go.mod", GOMODCACHE="/modcache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [
+            f"go mod download in {self.repo}/api with url.https://x-access-token:ghs_test@github.com/kernel/.insteadOf",
+            "gh api --method DELETE /installation/token",
+        ])
+        self.assertEqual(output, "dir=/modcache/cache/download/github.com/kernel\n")
+        self.assertNotIn("ghs_test", git(self.repo, "config", "--list"))
+
+    def test_fix_adds_private_modules_to_the_module_cache(self):
+        module = self.temp / "go-modules/hypeman-go/@v"
+        module.mkdir(parents=True)
+        (module / "v0.27.0.zip").write_text("zip")
+        path = self.stub("go", 'echo "$GOMODCACHE"\n')
+        cache = self.root / "modcache"
+        result, _ = self.run_step(
+            "fix", "Add private Go modules to the module cache", PATH=path, GOMODCACHE=str(cache))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        copied = cache / "cache/download/github.com/kernel/hypeman-go/@v/v0.27.0.zip"
+        self.assertEqual(copied.read_text(), "zip")
+
     def test_snapshot_without_publishable_changes(self):
         (self.repo / "api/main.go").write_text("package main\n")
         result, output = self.run_step("fix", "Snapshot publishable changes", AGENT_BASE=self.base)
@@ -193,6 +252,9 @@ class ShellStepTests(unittest.TestCase):
         patch = git(self.repo, "diff", "--cached", "--binary", "--no-renames")
         git(self.repo, "reset", "-q", "--hard")
         git(self.repo, "clean", "-fdq")
+        return self.publish(patch)
+
+    def publish(self, patch):
         (self.temp / "container-remediation/changes.patch").write_text(patch)
         return self.run_step(
             "publish", "Apply validated changes",
@@ -209,6 +271,14 @@ class ShellStepTests(unittest.TestCase):
         result, _ = self.publish_patch(lambda: (self.repo / "api/main.go").write_text("package main\n"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("outside the container remediation allowlist", result.stdout)
+
+    def test_publish_rejects_submodules(self):
+        result, _ = self.publish(
+            "diff --git a/api/go.sum b/api/go.sum\nnew file mode 160000\n"
+            f"index 0000000..{self.base}\n--- /dev/null\n+++ b/api/go.sum\n"
+            f"@@ -0,0 +1 @@\n+Subproject commit {self.base}\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("only contain regular files", result.stdout)
 
     def test_publish_rejects_symlinks(self):
         result, _ = self.publish_patch(lambda: (self.repo / "api/go.sum").symlink_to("/etc/passwd"))
