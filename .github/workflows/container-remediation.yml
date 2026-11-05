@@ -343,6 +343,7 @@ jobs:
             -o "$RUNNER_TEMP/disallowed-paths.sh"
 
       - name: Apply validated changes
+        id: apply
         run: |
           git config user.name "kernel-internal[bot]"
           git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
@@ -365,6 +366,8 @@ jobs:
             exit 1
           fi
           git commit -q -m "security: container vulnerability remediation ($(date -u +%Y-%m-%d))"
+          # Scheduled runs have no event payload, so github.event.repository is empty.
+          echo "repo=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
 
       - name: Generate app token
         id: app-token
@@ -372,6 +375,8 @@ jobs:
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.apply.outputs.repo }}
           permission-contents: write
           permission-pull-requests: write
 

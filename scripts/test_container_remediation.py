@@ -99,6 +99,12 @@ class ContainerRemediationTests(unittest.TestCase):
         self.assertEqual(
             {k: v for k, v in mint["with"].items() if k.startswith("permission-")},
             {"permission-contents": "write", "permission-pull-requests": "write"})
+        self.assertEqual(mint["with"]["owner"], "${{ github.repository_owner }}")
+        # Not github.event.repository.name: schedule events have no payload, and an
+        # empty list with an owner mints a token for every repo the app can reach.
+        self.assertEqual(mint["with"]["repositories"], "${{ steps.apply.outputs.repo }}")
+        self.assertIn('echo "repo=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"',
+                      self.step("publish", "Apply validated changes")["run"])
         self.assertLess(self.index("publish", "Apply validated changes"), self.index("publish", "Generate app token"))
         for step in self.steps("publish")[:self.index("publish", "Generate app token")]:
             self.assertNotRegex(yaml.safe_dump(step), TOKEN_REF)
@@ -188,11 +194,14 @@ class ShellStepTests(unittest.TestCase):
         git(self.repo, "reset", "-q", "--hard")
         git(self.repo, "clean", "-fdq")
         (self.temp / "container-remediation/changes.patch").write_text(patch)
-        return self.run_step("publish", "Apply validated changes", MAIN_SHA=self.base, BRANCH="security/container-remediation")
+        return self.run_step(
+            "publish", "Apply validated changes",
+            MAIN_SHA=self.base, BRANCH="security/container-remediation", GITHUB_REPOSITORY="kernel/kernel")
 
     def test_publish_commits_allowlisted_patch(self):
-        result, _ = self.publish_patch(self.bump_go_mod)
+        result, output = self.publish_patch(self.bump_go_mod)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, "repo=kernel\n")
         self.assertEqual(git(self.repo, "branch", "--show-current").strip(), "security/container-remediation")
         self.assertEqual(git(self.repo, "show", "--name-only", "--format=%an", "HEAD").split(), ["kernel-internal[bot]", "api/go.mod"])
 
