@@ -11,7 +11,7 @@ You are a security engineer triaging container image vulnerability scan results 
 
 Prioritize findings by exploitability and impact, not just severity score. Use this order:
 
-1. **Known Exploited (KEV)**: Check if the CVE is in the CISA Known Exploited Vulnerabilities catalog (https://www.cisa.gov/known-exploited-vulnerabilities-catalog). These get highest priority regardless of severity score.
+1. **Known Exploited (KEV)**: Check if the CVE is in the CISA Known Exploited Vulnerabilities catalog. Download it with `curl -fsSL https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` and search it for the CVE IDs. These get highest priority regardless of severity score.
 
 2. **Reachable + Severe**: The vulnerable package is compiled into our application binary (`api` target) AND has Critical/High severity. These are reachable by definition — if a Go package appears in our compiled binary, its code is linked and callable.
 
