@@ -105,8 +105,8 @@ def findings_on_head(results: dict[str, Any], head: str) -> dict[str, Any]:
     since the PR does not touch them and they cannot be commented on.
     """
     paths = sorted({f["path"] for f in results.get("results", [])})
-    diff = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "-U0", "--no-renames",
-                           "--no-ext-diff", "--no-textconv", head, "HEAD", "--", *paths],
+    diff = subprocess.run(["git", "--literal-pathspecs", "-c", "core.quotePath=false", "diff", "-U0",
+                           "--no-renames", "--no-ext-diff", "--no-textconv", head, "HEAD", "--", *paths],
                           capture_output=True, text=True, check=True).stdout
     hunks = diff_hunks(diff)
     kept = []

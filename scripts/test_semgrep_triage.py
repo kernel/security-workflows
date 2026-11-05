@@ -77,6 +77,8 @@ class FindingsOnHeadTest(unittest.TestCase):
 
 
 class GatherTest(unittest.TestCase):
+    path = "app.py"
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -101,21 +103,23 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(git(self.root, "rev-parse", "HEAD^2"), self.head)
 
     def write(self, lines):
-        (self.root / "app.py").write_text("\n".join(lines) + "\n")
+        file = self.root / self.path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("\n".join(lines) + "\n")
 
     def finding(self, line):
-        return {"path": "app.py", "check_id": "shell",
+        return {"path": self.path, "check_id": "shell",
                 "start": {"line": line, "col": 5}, "end": {"line": line, "col": 9}}
 
     def test_moves_findings_onto_the_pr_head_and_writes_pr_context(self):
-        merge_lines = (self.root / "app.py").read_text().splitlines()
+        merge_lines = (self.root / self.path).read_text().splitlines()
         self.assertEqual(merge_lines[4], "    return run(host, shell=True)")
         results = self.root / "semgrep-results.json"
         # Line 5 is the PR's change; line 9 only exists because the base branch added it.
         results.write_text(json.dumps({"results": [self.finding(5), self.finding(9)], "errors": []}))
         patch = "@@ -1,2 +1,2 @@\n def ping(host):\n-    return host\n+    return run(host, shell=True)"
-        gh = FakeGitHub(files=[{"filename": "app.py", "patch": patch}],
-                        comments=[{"path": "app.py", "line": 2, "original_line": 2,
+        gh = FakeGitHub(files=[{"filename": self.path, "patch": patch}],
+                        comments=[{"path": self.path, "line": 2, "original_line": 2,
                                    "user": {"login": "cursor[bot]"}, "body": "not passed on"}])
         out = self.root.parent / "triage"
         cwd = os.getcwd()
@@ -127,11 +131,16 @@ class GatherTest(unittest.TestCase):
         moved = json.loads(results.read_text())
         self.assertEqual(moved["errors"], [])
         self.assertEqual([(f["start"]["line"], f["end"]["line"]) for f in moved["results"]], [(2, 2)])
-        head_lines = git(self.root, "show", f"{self.head}:app.py").splitlines()
+        head_lines = git(self.root, "show", f"{self.head}:{self.path}").splitlines()
         self.assertEqual(head_lines[1], "    return run(host, shell=True)")
-        self.assertEqual(json.loads((out / "commentable-lines.json").read_text()), {"app.py": [[1, 2]]})
+        self.assertEqual(json.loads((out / "commentable-lines.json").read_text()), {self.path: [[1, 2]]})
         self.assertEqual(json.loads((out / "existing-comments.json").read_text()),
-                         [{"path": "app.py", "line": 2, "original_line": 2, "author": "cursor[bot]"}])
+                         [{"path": self.path, "line": 2, "original_line": 2, "author": "cursor[bot]"}])
+
+
+class PathspecCharacterGatherTest(GatherTest):
+    # Semgrep paths are file names, not pathspecs: a leading ":" is pathspec magic and "[id]" a glob.
+    path = ":[id].py"
 
 
 class ParseResultTest(unittest.TestCase):
