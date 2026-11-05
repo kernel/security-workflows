@@ -2,6 +2,7 @@
 """Shadow-mode risk classifier for small pull requests, run by pr-risk.yml.
 
 `gather` decides whether a PR is eligible and builds the model input using a read-only token.
+`verdict` turns pi's JSON event stream into result.json, the verdict envelope `comment` reads.
 `comment` turns the model's verdict into one sticky PR comment using the kernel-internal token.
 Nothing here approves anything: the comment only records whether the PR would have been
 auto-approved, so the call can be checked against what reviewers actually did.
@@ -318,6 +319,56 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
     return gate
 
 
+def schema_error(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return "reply is not a JSON object"
+    props = VERDICT_SCHEMA["properties"]
+    extra = sorted(set(value) - set(props))
+    if extra:
+        return f"unexpected keys {extra}"
+    for key in VERDICT_SCHEMA["required"]:
+        if key not in value:
+            return f"missing {key}"
+    for key, spec in props.items():
+        expected = {"string": str, "boolean": bool}[spec["type"]]
+        if not isinstance(value[key], expected):
+            return f"{key} must be a {spec['type']}"
+        if "enum" in spec and value[key] not in spec["enum"]:
+            return f"{key} must be one of {spec['enum']}"
+    return None
+
+
+def verdict_from_events(events: str) -> dict[str, Any]:
+    """Build the result envelope `parse_verdict` reads from `pi --mode json` output.
+
+    pi has no schema-constrained output, so the model replies with one JSON object and it is
+    checked here against VERDICT_SCHEMA. Anything else is reported as a classifier error.
+    """
+    reply = None
+    for line in events.split("\n"):
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        message = event.get("message") or {}
+        if event.get("type") == "message_end" and message.get("role") == "assistant":
+            reply = message
+    if reply is None:
+        return {"is_error": True, "result": "pi produced no assistant reply"}
+    if reply.get("stopReason") != "stop":
+        detail = reply.get("errorMessage") or "no error message"
+        return {"is_error": True, "result": f"pi stopped with {reply.get('stopReason')}: {detail}"}
+    text = "".join(c["text"] for c in reply["content"] if c.get("type") == "text").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.S)
+    try:
+        value = json.loads(fenced.group(1) if fenced else text)
+    except json.JSONDecodeError:
+        value = None
+    error = schema_error(value) if value is not None else "reply is not JSON"
+    if error:
+        return {"is_error": True, "result": f"classifier reply does not match the verdict schema: {error}"}
+    return {"is_error": False, "result": text, "structured_output": value}
+
+
 def parse_verdict(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("is_error"):
         raise ValueError(f"classifier errored: {result.get('result')}")
@@ -431,6 +482,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("schema")
+    sub.add_parser("verdict").add_argument("--dir", type=Path, required=True)
     for name in ("gather", "comment"):
         p = sub.add_parser(name)
         p.add_argument("--repo", required=True)
@@ -440,6 +492,10 @@ def main() -> int:
 
     if args.cmd == "schema":
         print(json.dumps(VERDICT_SCHEMA))
+        return 0
+    if args.cmd == "verdict":
+        result = verdict_from_events((args.dir / "pi-events.jsonl").read_text())
+        (args.dir / "result.json").write_text(json.dumps(result, indent=2))
         return 0
     gh = GitHub(args.repo)
     if args.cmd == "gather":

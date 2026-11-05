@@ -25,8 +25,10 @@ Set `deny` to true, whatever the tier, if the change touches any of these, even 
 
 ## Output
 
+Reply with one JSON object and nothing else, with exactly these keys:
+
 - `tier`: one of the tiers above.
 - `deny`: as defined above.
 - `category`: a short kebab-case label for the kind of change, such as `flag-allowlist`, `flag-rollout`, `docs`, `test-only`, `config`, `copy`, `bug-fix` or `refactor`.
-- `confidence`: how sure you are of the tier. Use `low` when the diff depends on context you were not given.
+- `confidence`: `high`, `medium` or `low`: how sure you are of the tier. Use `low` when the diff depends on context you were not given.
 - `reason`: one or two plain sentences, at most 40 words, naming what the change does and why that is or is not safe to approve without review. If `deny` is true, name the denied area. No preamble and no restating the tier.
