@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,15 @@ elif "--slurp" in sys.argv:
     print(json.dumps([[{"n": 1}, {"n": 2}], [{"n": 3}]]))
 else:
     print("{}")
+'''
+
+# Stands in for `pi`: records its arguments, working directory and stdin, and replays canned events.
+FAKE_PI = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ["FAKE_PI_LOG"]).write_text(json.dumps({
+    "args": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read()}))
+sys.stdout.write(Path(os.environ["FAKE_PI_EVENTS"]).read_text())
 '''
 
 PATCH = "@@ -10,3 +10,4 @@ flags:\n   - a\n   - b\n+  - c\n   - d"
@@ -100,6 +110,26 @@ def visible_words(body):
 
 VERDICT = {"tier": "low", "deny": False, "category": "flag-allowlist", "confidence": "high",
            "reason": "Adds one org to an existing beta allowlist."}
+
+
+def pi_events(text=None, stop="stop", error=None):
+    """A `pi --mode json` stream whose final assistant reply is `text`."""
+    reply = {"role": "assistant", "content": [{"type": "thinking", "thinking": "{}"}],
+             "stopReason": stop}
+    if text is not None:
+        reply["content"].append({"type": "text", "text": text})
+    if error:
+        reply["errorMessage"] = error
+    events = [
+        {"type": "session", "version": 3, "id": "s", "cwd": "/tmp"},
+        {"type": "agent_start"},
+        {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "PR"}]}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "{"}},
+        {"type": "message_end", "message": reply},
+        {"type": "agent_end", "messages": [reply], "willRetry": False},
+        {"type": "agent_settled", "aborted": False},
+    ]
+    return "".join(json.dumps(e) + "\n" for e in events)
 
 
 class PRRiskTests(unittest.TestCase):
@@ -285,20 +315,101 @@ class PRRiskTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[3]["stdin"]), {"body": "hello"})
         self.assertEqual(calls[4]["args"], ["api", "/repos/kernel/infra/collaborators/kernel-internal%5Bbot%5D/permission"])
 
+    def test_verdict_from_events(self):
+        reply = json.dumps(VERDICT)
+        self.assertEqual(pr_risk.verdict_from_events(pi_events(reply)),
+                         {"is_error": False, "result": reply, "structured_output": VERDICT})
+        fenced = pr_risk.verdict_from_events(pi_events(f"```json\n{reply}\n```"))
+        self.assertEqual(fenced["structured_output"], VERDICT)
+        failures = {
+            "pi stopped with error: 401 bad key": pi_events(None, stop="error", error="401 bad key"),
+            "pi stopped with length": pi_events(reply[:20], stop="length"),
+            "pi produced no assistant reply": pi_events(reply).replace('"assistant"', '"user"'),
+            "reply is not JSON": pi_events(f"Here is the verdict: {reply}"),
+            "reply is not a JSON object": pi_events("[]"),
+            "unexpected keys ['approve']": pi_events(json.dumps({**VERDICT, "approve": True})),
+            "missing reason": pi_events(json.dumps({k: v for k, v in VERDICT.items() if k != "reason"})),
+            "deny must be a boolean": pi_events(json.dumps({**VERDICT, "deny": "false"})),
+            "tier must be one of": pi_events(json.dumps({**VERDICT, "tier": "none"})),
+            "confidence must be one of": pi_events(json.dumps({**VERDICT, "confidence": "certain"})),
+        }
+        for expected, events in failures.items():
+            with self.subTest(expected=expected):
+                result = pr_risk.verdict_from_events(events)
+                self.assertTrue(result["is_error"])
+                self.assertNotIn("structured_output", result)
+                self.assertIn(expected, result["result"])
+                with self.assertRaisesRegex(ValueError, "classifier errored"):
+                    pr_risk.parse_verdict(result)
+
+    def test_verdict_from_events_feeds_comment(self):
+        gh = FakeGitHub(pr(), [file()])
+        _, code, _ = self.run_pr(gh, result=pr_risk.verdict_from_events(pi_events(json.dumps(VERDICT))))
+        self.assertEqual(code, 0)
+        self.assertIn("**Would auto-approve: yes** · low risk", gh.created[0])
+
+        existing = {"id": 3, "user": {"type": "Bot"}, "body": pr_risk.MARKER}
+        gh = FakeGitHub(pr(), [file()], comments=[existing])
+        _, code, _ = self.run_pr(gh, result=pr_risk.verdict_from_events(pi_events(None, stop="error", error="x")))
+        self.assertEqual(code, 1)
+        self.assertIn("**Not assessed**", gh.updated[0][1])
+
     def test_workflow_isolates_the_model(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         job = workflow["jobs"]["classify"]
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         steps = {s["name"]: s for s in job["steps"]}
         classify = steps["Classify"]
-        self.assertEqual(set(classify["env"]), {"ANTHROPIC_API_KEY", "MODEL"})
-        self.assertIn('--tools ""', classify["run"])
+        self.assertEqual(set(classify["env"]), {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MODEL",
+                                                "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY"})
+        self.assertEqual(classify["env"]["MODEL"], "${{ inputs.model }}")
+        for flag in ("--no-tools", "--no-mcp", "--no-extensions", "--no-skills", "--no-prompt-templates",
+                     "--no-context-files", "--no-approve", "--no-session"):
+            self.assertIn(flag, classify["run"])
+        self.assertNotIn("--approve ", classify["run"])
+        self.assertNotIn("GH_TOKEN", json.dumps({k: steps[k] for k in ("Install Pi", "Classify")}))
         names = list(steps)
         self.assertLess(names.index("Classify"), names.index("Generate app token"))
         self.assertEqual(steps["Generate app token"]["with"]["permission-pull-requests"], "write")
         self.assertEqual(steps["Gather"]["env"]["GH_TOKEN"], "${{ github.token }}")
         triggers = workflow[True]["workflow_call"]
-        self.assertEqual(set(triggers["secrets"]), {"ADMIN_APP_ID", "ADMIN_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY"})
+        self.assertEqual(triggers["inputs"]["model"]["default"], "${{ vars.PI_PREFERRED_MODEL }}")
+        self.assertEqual(set(triggers["secrets"]),
+                         {"ADMIN_APP_ID", "ADMIN_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
+        self.assertFalse(triggers["secrets"]["ANTHROPIC_API_KEY"]["required"])
+        self.assertFalse(triggers["secrets"]["OPENAI_API_KEY"]["required"])
+
+    def test_classify_step_runs_pi(self):
+        script = yaml.safe_load(WORKFLOW.read_text())["jobs"]["classify"]["steps"]
+        script = next(s for s in script if s["name"] == "Classify")["run"]
+        repo = Path(__file__).resolve().parents[1]
+        script = (script.replace("/tmp/pr_risk.py", str(repo / "scripts/pr_risk.py"))
+                        .replace("/tmp/pr-risk-prompt.md", str(repo / ".github/workflows/pr-risk/classify-prompt.md")))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            (work / "input.md").write_text("# Pull request\n")
+            (root / "bin").mkdir()
+            (root / "bin/pi").write_text(FAKE_PI)
+            (root / "bin/pi").chmod(0o755)
+            (root / "events.jsonl").write_text(pi_events(json.dumps(VERDICT)))
+            env = {"PATH": f"{root / 'bin'}:{os.environ['PATH']}", "WORKDIR": str(work),
+                   "MODEL": "openai/some-model", "OPENAI_API_KEY": "sk-test",
+                   "FAKE_PI_LOG": str(root / "pi.json"), "FAKE_PI_EVENTS": str(root / "events.jsonl")}
+            subprocess.run(["bash", "-c", script], env=env, check=True)
+            call = json.loads((root / "pi.json").read_text())
+            result = json.loads((work / "result.json").read_text())
+
+            empty = subprocess.run(["bash", "-c", script], env={**env, "MODEL": ""}, capture_output=True, text=True)
+        self.assertNotEqual(empty.returncode, 0)
+        self.assertIn("PI_PREFERRED_MODEL", empty.stderr)
+        self.assertEqual(result, {"is_error": False, "result": json.dumps(VERDICT), "structured_output": VERDICT})
+        self.assertEqual(call["stdin"], "# Pull request\n")
+        self.assertEqual(call["cwd"], str(work / "cwd"))
+        args = call["args"]
+        self.assertEqual(args[args.index("--model") + 1], "openai/some-model")
+        self.assertTrue(args[args.index("--system-prompt") + 1].endswith("classify-prompt.md"))
 
 
 if __name__ == "__main__":

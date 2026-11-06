@@ -74,8 +74,8 @@ approves.
 These PRs are skipped with no comment: drafts, fork PRs, PRs whose author lacks write
 access to the repo (including bots), PRs over 50 changed lines, and PRs that touch a
 deny-listed path. The defaults live in `scripts/pr_risk.py`, and callers can add more
-through `deny-paths`. Claude classifies everything else and can deny a PR on its own
-judgment. The comment stores its verdict in a hidden `pr-risk:v1` JSON marker for later analysis.
+through `deny-paths`. A model run through pi classifies everything else and can deny a PR on its
+own judgment. The comment stores its verdict in a hidden `pr-risk:v1` JSON marker for later analysis.
 
 ```yaml
 # In your repo's .github/workflows/pr-risk.yml
@@ -96,7 +96,11 @@ jobs:
       ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
       ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
+
+The model defaults to the `PI_PREFERRED_MODEL` variable and can be overridden with the `model`
+input. Pass the API key for that model's provider; both keys are optional secrets.
 
 ## Enrollment
 
