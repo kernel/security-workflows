@@ -20,4 +20,5 @@ jobs:
       image-ref: ${{ inputs.image-ref }}
       go-version-file: 'test/container-remediation/go.mod'
       ecr-role-to-assume: ${{ vars.ECR_PUSHER }}
+      security-workflows-ref: ${{ github.sha }}
     secrets: inherit

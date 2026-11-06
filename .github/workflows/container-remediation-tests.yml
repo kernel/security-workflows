@@ -1,0 +1,29 @@
+name: Container Remediation Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/container-remediation.yml
+      - .github/workflows/container-remediation-tests.yml
+      - .github/workflows/container-scan/**
+      - scripts/test_container_remediation.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/container-remediation.yml
+      - .github/workflows/container-remediation-tests.yml
+      - .github/workflows/container-scan/**
+      - scripts/test_container_remediation.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: |
+          python3 -m venv /tmp/container-remediation-tests
+          /tmp/container-remediation-tests/bin/pip install PyYAML==6.0.3
+          /tmp/container-remediation-tests/bin/python -m unittest discover -s scripts -p test_container_remediation.py

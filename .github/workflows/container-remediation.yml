@@ -6,6 +6,11 @@ name: Container Vulnerability Remediation
 #
 # Modeled after vuln-remediation.yml (Socket SCA), but for container-level
 # findings (OS packages + compiled-in Go deps).
+#
+# The agent never holds GitHub credentials. The go-modules job fetches private
+# Go modules ahead of it. The fix job runs Pi with only the model API keys, keeps
+# only go.mod, go.sum, and Dockerfile changes, and builds them. The publish job
+# re-checks that patch and only then mints the token that pushes and opens the PR.
 
 on:
   workflow_call:
@@ -45,21 +50,23 @@ jobs:
       has-findings: ${{ steps.check.outputs.has_findings }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Configure AWS credentials
         if: inputs.ecr-role-to-assume != ''
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ inputs.ecr-role-to-assume }}
           aws-region: ${{ inputs.aws-region }}
 
       - name: Log in to ECR
         if: inputs.ecr-role-to-assume != ''
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Scan container image
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec # master
         with:
           image-ref: ${{ inputs.image-ref }}
           severity: 'CRITICAL,HIGH'
@@ -81,7 +88,7 @@ jobs:
           fi
 
       - name: Upload scan results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: container-scan-report
           path: trivy-results.json
@@ -92,134 +99,362 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Download scan results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: container-scan-report
 
-      - name: Install Claude Code CLI
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Install Pi
+        env:
+          PI_TELEMETRY: '0'
         run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+          pi --version
 
       - name: Triage findings
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
+          PI_SKIP_VERSION_CHECK: '1'
+          PI_TELEMETRY: '0'
+          REF: ${{ inputs.security-workflows-ref }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/triage-prompt.md" \
-            | envsubst '${GITHUB_REPOSITORY}' \
-            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+          : "${PI_PREFERRED_MODEL:?Set the PI_PREFERRED_MODEL organization variable}"
+          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/$REF/.github/workflows/container-scan/triage-prompt.md" \
+            | envsubst '${GITHUB_REPOSITORY}' > "$RUNNER_TEMP/triage-prompt.md"
+          pi --print --no-session --approve \
+            --model "$PI_PREFERRED_MODEL" --thinking max \
+            @"$RUNNER_TEMP/triage-prompt.md"
 
       - name: Upload triage results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: container-triage-result
           path: triage-result.json
         if: always()
 
-  fix:
-    needs: triage
+  # Every secret a job references stays readable in runner memory for the whole
+  # job, so private modules are fetched here and the agent's job only gets the
+  # model API keys.
+  go-modules:
+    needs: scan
+    if: needs.scan.outputs.has-findings == 'true' && inputs.go-version-file != ''
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
-      pull-requests: write
-    timeout-minutes: 10
+      contents: read
+    timeout-minutes: 15
+    outputs:
+      private-modules: ${{ steps.go-private.outputs.repos != '' }}
+      main_sha: ${{ steps.go-private.outputs.main_sha }}
+    env:
+      GOPRIVATE: github.com/kernel/*
+      GO_VERSION_FILE: ${{ inputs.go-version-file }}
     steps:
-      - name: Generate app token
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      # The fix job builds on this same main commit.
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          # Private module sources must not land in the repository's Actions cache.
+          cache: false
+
+      - name: Find private Go modules
+        id: go-private
+        run: |
+          repos=$(go mod edit -json "$GO_VERSION_FILE" | jq -r '
+            [.Require[]?.Path, .Replace[]?.New.Path]
+            | map(select(startswith("github.com/kernel/")) | split("/")[2])
+            | unique | join(",")')
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Go module read token
+        id: module-token
+        if: steps.go-private.outputs.repos != ''
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: kernel
+          repositories: ${{ steps.go-private.outputs.repos }}
+          permission-contents: read
 
+      - name: Download private Go modules
+        id: download
+        if: steps.go-private.outputs.repos != ''
+        env:
+          GH_TOKEN: ${{ steps.module-token.outputs.token }}
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:$GH_TOKEN@github.com/kernel/.insteadOf"
+          export GIT_CONFIG_VALUE_0=https://github.com/kernel/
+          (cd "$(dirname "$GO_VERSION_FILE")" && go mod download)
+          gh api --method DELETE /installation/token
+          echo "dir=$(go env GOMODCACHE)/cache/download/github.com/kernel" >> "$GITHUB_OUTPUT"
+
+      - name: Upload private Go modules
+        if: steps.go-private.outputs.repos != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-remediation-go-modules
+          path: ${{ steps.download.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+  fix:
+    needs: [triage, go-modules]
+    # go-modules is skipped when the caller has no Go module.
+    if: >-
+      !cancelled() && needs.triage.result == 'success' &&
+      (needs.go-modules.result == 'success' || needs.go-modules.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.snapshot.outputs.changed }}
+      main_sha: ${{ steps.prepare.outputs.main_sha }}
+      update_sha: ${{ steps.prepare.outputs.update_sha }}
+    env:
+      GOPRIVATE: github.com/kernel/*
+    steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Download scan results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: container-scan-report
+          path: ${{ runner.temp }}/container-scan
 
       - name: Download triage results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: container-triage-result
+          path: ${{ runner.temp }}/container-scan
         continue-on-error: true
 
-      - name: Configure git identity
-        run: |
-          git config user.name "kernel-internal[bot]"
-          git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
-          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
-        env:
-          GOPRIVATE: github.com/kernel/*
-
       - name: Reset remediation branch to main
-        run: git checkout -B security/container-remediation origin/main
+        id: prepare
+        env:
+          MODULES_MAIN_SHA: ${{ needs.go-modules.outputs.main_sha }}
+        run: |
+          # Private modules were fetched for go-modules' main commit, which may trail origin/main.
+          main_sha=${MODULES_MAIN_SHA:-$(git rev-parse origin/main)}
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "update_sha=$(git rev-parse -q --verify refs/remotes/origin/security/container-remediation || true)" >> "$GITHUB_OUTPUT"
+          git checkout -B security/container-remediation "$main_sha"
+
+      - name: Fetch fix prompt and path allowlist
+        env:
+          REF: ${{ inputs.security-workflows-ref }}
+        run: |
+          base="https://raw.githubusercontent.com/kernel/security-workflows/$REF/.github/workflows/container-scan"
+          curl -fsSL "$base/fix-prompt.md" -o "$RUNNER_TEMP/fix-prompt.md"
+          curl -fsSL "$base/disallowed-paths.sh" -o "$RUNNER_TEMP/disallowed-paths.sh"
 
       - name: Setup Go
         if: inputs.go-version-file != ''
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
-        env:
-          GOPRIVATE: github.com/kernel/*
+          # The agent can write to the module cache, so this job must not save it.
+          cache: false
 
-      - name: Install Claude Code CLI
+      - name: Download private Go modules
+        if: needs.go-modules.outputs.private-modules == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: container-remediation-go-modules
+          path: ${{ runner.temp }}/go-modules
+
+      - name: Add private Go modules to the module cache
+        if: needs.go-modules.outputs.private-modules == 'true'
         run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          dir="$(go env GOMODCACHE)/cache/download/github.com/kernel"
+          mkdir -p "$dir"
+          cp -R "$RUNNER_TEMP/go-modules/." "$dir/"
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Install Pi
+        env:
+          PI_TELEMETRY: '0'
+        run: |
+          npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+          pi --version
 
       - name: Apply fixes
-        timeout-minutes: 8
+        timeout-minutes: 20
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GOPRIVATE: github.com/kernel/*
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
+          PI_SKIP_VERSION_CHECK: '1'
+          PI_TELEMETRY: '0'
           GO_MODULE_DIR: ${{ inputs.go-version-file != '' && format('{0}', inputs.go-version-file) || '.' }}
+          SCAN_DIR: ${{ runner.temp }}/container-scan
         run: |
-          export DATE="$(date -u +%Y-%m-%d)"
-          export GO_MODULE_DIR="$(dirname "$GO_MODULE_DIR")"
-          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/${{ inputs.security-workflows-ref }}/.github/workflows/container-scan/fix-prompt.md" \
-            | envsubst '${GITHUB_REPOSITORY} ${DATE} ${GO_MODULE_DIR}' \
-            | claude -p --model ${{ vars.CLAUDE_CODE_PREFERRED_MODEL }} --dangerously-skip-permissions --output-format text --verbose
+          : "${PI_PREFERRED_MODEL:?Set the PI_PREFERRED_MODEL organization variable}"
+          DATE="$(date -u +%Y-%m-%d)"
+          GO_MODULE_DIR="$(dirname "$GO_MODULE_DIR")"
+          export DATE GO_MODULE_DIR
+          envsubst '${GITHUB_REPOSITORY} ${DATE} ${GO_MODULE_DIR} ${SCAN_DIR}' \
+            < "$RUNNER_TEMP/fix-prompt.md" > "$RUNNER_TEMP/fix-prompt.rendered.md"
+          pi --print --no-session --approve \
+            --model "$PI_PREFERRED_MODEL" --thinking max \
+            @"$RUNNER_TEMP/fix-prompt.rendered.md"
 
-      - name: Check for changes
-        id: diff
+      - name: Snapshot publishable changes
+        id: snapshot
+        env:
+          AGENT_BASE: ${{ steps.prepare.outputs.main_sha }}
         run: |
-          if git diff --quiet; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          git reset -q --soft "$AGENT_BASE"
+          git add -A
+          git diff --cached --name-only --no-renames -z \
+            | bash "$RUNNER_TEMP/disallowed-paths.sh" > "$RUNNER_TEMP/excluded-paths"
+          if [[ -s "$RUNNER_TEMP/excluded-paths" ]]; then
+            echo "::warning::Discarding changes outside the container remediation allowlist:"
+            tr '\0' '\n' < "$RUNNER_TEMP/excluded-paths"
+            GIT_LITERAL_PATHSPECS=1 git reset -q --pathspec-from-file="$RUNNER_TEMP/excluded-paths" --pathspec-file-nul
+          fi
+          git diff --cached --binary --no-renames --no-ext-diff --no-textconv > "$RUNNER_TEMP/changes.patch"
+          git reset -q --hard
+          git clean -fdq
+          if [[ -s "$RUNNER_TEMP/changes.patch" ]]; then
+            git apply --index "$RUNNER_TEMP/changes.patch"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit and push
-        if: steps.diff.outputs.has_changes == 'true'
+      - name: Verify changes
+        if: steps.snapshot.outputs.changed == 'true'
         run: |
-          git add --all -- '*.mod' '*.sum' '*Dockerfile*'
-          git diff --cached --quiet && { echo "No relevant changes to commit"; exit 0; }
-          git commit -m "security: container vulnerability remediation ($(date -u +%Y-%m-%d))"
-          git push --force-with-lease origin security/container-remediation
+          git diff --cached --check
+          mapfile -t dirs < <(git diff --cached --name-only -- '*go.mod' '*go.sum' | xargs -r -n1 dirname | sort -u)
+          for dir in "${dirs[@]}"; do
+            (cd "$dir" && go build ./...)
+          done
+
+      - name: Upload validated changes
+        if: steps.snapshot.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-remediation-patch
+          path: ${{ runner.temp }}/changes.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: fix
+    # A skipped go-modules job would otherwise skip this job too.
+    if: "!cancelled() && needs.fix.result == 'success' && needs.fix.outputs.changed == 'true'"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    env:
+      BRANCH: security/container-remediation
+      MAIN_SHA: ${{ needs.fix.outputs.main_sha }}
+      UPDATE_SHA: ${{ needs.fix.outputs.update_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download validated changes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: container-remediation-patch
+          path: ${{ runner.temp }}/container-remediation
+
+      - name: Fetch path allowlist
+        env:
+          REF: ${{ inputs.security-workflows-ref }}
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/kernel/security-workflows/$REF/.github/workflows/container-scan/disallowed-paths.sh" \
+            -o "$RUNNER_TEMP/disallowed-paths.sh"
+
+      - name: Apply validated changes
+        id: apply
+        run: |
+          git config user.name "kernel-internal[bot]"
+          git config user.email "260533166+kernel-internal[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH" "$MAIN_SHA"
+          git apply --index "$RUNNER_TEMP/container-remediation/changes.patch"
+          git diff --cached --name-only --no-renames -z \
+            | bash "$RUNNER_TEMP/disallowed-paths.sh" > "$RUNNER_TEMP/disallowed-paths"
+          if [[ -s "$RUNNER_TEMP/disallowed-paths" ]]; then
+            echo "::error::Validated changes include paths outside the container remediation allowlist:"
+            tr '\0' '\n' < "$RUNNER_TEMP/disallowed-paths"
+            exit 1
+          fi
+          if git diff --cached --raw --no-renames | awk '$2 !~ /^(100644|100755|000000)$/ { found = 1 } END { exit !found }'; then
+            echo "::error::Validated changes may only contain regular files."
+            exit 1
+          fi
+          # A replace directive can swap a dependency for any other source.
+          if git diff --cached -U0 --no-ext-diff -- '*go.mod' | grep -v '^+++' | grep -q '^+.*=>'; then
+            echo "::error::Validated changes may not add replace directives."
+            exit 1
+          fi
+          git commit -q -m "security: container vulnerability remediation ($(date -u +%Y-%m-%d))"
+          # Scheduled runs have no event payload, so github.event.repository is empty.
+          echo "repo=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.apply.outputs.repo }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Create or update PR
-        if: steps.diff.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          IMAGE_REF: ${{ inputs.image-ref }}
         run: |
+          gh auth setup-git
+          git push --force-with-lease="$BRANCH:$UPDATE_SHA" origin "$BRANCH"
+
           REPO="${{ github.repository }}"
-          EXISTING_PR=$(gh pr list --repo "$REPO" --head security/container-remediation --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           BODY="## Container Vulnerability Remediation
 
           Automated fixes for container image vulnerabilities detected by Trivy.
 
-          **Image:** \`${{ inputs.image-ref }}\`
+          **Image:** \`${IMAGE_REF}\`
           **Date:** $(date -u +%Y-%m-%d)
 
           See workflow run for scan results and triage details."
@@ -230,7 +465,7 @@ jobs:
           else
             gh pr create \
               --repo "$REPO" \
-              --head security/container-remediation \
+              --head "$BRANCH" \
               --base main \
               --title "security: container vulnerability remediation" \
               --assignee ulziibay-kernel \
