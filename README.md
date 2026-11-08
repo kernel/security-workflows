@@ -86,6 +86,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  id-token: write
 jobs:
   classify:
     uses: kernel/security-workflows/.github/workflows/pr-risk.yml@main
@@ -95,12 +96,12 @@ jobs:
     secrets:
       ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
       ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
 The model defaults to the `PI_PREFERRED_MODEL` variable and can be overridden with the `model`
-input. Pass the API key for that model's provider; both keys are optional secrets.
+input. It must be an `anthropic/` or `openai/` model. There is no API key to pass:
+`scripts/llm_credentials.sh` exchanges the job's GitHub OIDC token for short-lived provider
+credentials through workload identity federation, which is why the caller grants `id-token: write`.
 
 ## Enrollment
 
@@ -135,7 +136,7 @@ projectIgnorePaths:
 
 Consumer repos need these secrets (set at org or repo level):
 
-- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Pi) and the `pr-risk.yml` classifier (Claude Code)
+- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Pi)
 - `OPENAI_API_KEY` — for the `semgrep.yml` triage agent (Pi), when `PI_PREFERRED_MODEL` is an OpenAI model
 - `CURSOR_API_KEY` — for the other fix/remediation agents (Cursor)
 - `ADMIN_APP_ID` + `ADMIN_APP_PRIVATE_KEY` — GitHub App for write access
@@ -145,6 +146,8 @@ Consumer repos need these secrets (set at org or repo level):
 
 Consumer repos need these variables (set at org or repo level):
 
-- `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent (Pi)
-- `CLAUDE_CODE_PREFERRED_MODEL` — model for the `pr-risk.yml` classifier (Claude Code)
+- `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Pi)
+- `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
+  `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_WIF_AUDIENCE` — workload
+  identity federation for `pr-risk.yml`, set at the org level
 - `CURSOR_PREFERRED_MODEL` — model for the other Cursor agent invocations
