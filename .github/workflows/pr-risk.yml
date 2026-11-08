@@ -100,7 +100,7 @@ jobs:
       # `uses` can't take an expression, so this follows main rather than security-workflows-ref.
       - name: Model credentials
         if: steps.gather.outputs.eligible == 'true'
-        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        uses: kernel/security-workflows/.github/actions/llm-credentials@hypeship/llm-credentials-livetest
         with:
           model: ${{ inputs.model }}
           anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
