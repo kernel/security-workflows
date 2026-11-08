@@ -357,11 +357,11 @@ class PRRiskTests(unittest.TestCase):
     def test_workflow_isolates_the_model(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         job = workflow["jobs"]["classify"]
-        self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
+        self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read", "id-token": "write"})
+        self.assertNotIn("secrets.", json.dumps(job["env"]))
         steps = {s["name"]: s for s in job["steps"]}
         classify = steps["Classify"]
-        self.assertEqual(set(classify["env"]), {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MODEL",
-                                                "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY"})
+        self.assertEqual(set(classify["env"]), {"MODEL", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY"})
         self.assertEqual(classify["env"]["MODEL"], "${{ inputs.model }}")
         for flag in ("--no-tools", "--no-mcp", "--no-extensions", "--no-skills", "--no-prompt-templates",
                      "--no-context-files", "--no-approve", "--no-session"):
@@ -383,10 +383,12 @@ class PRRiskTests(unittest.TestCase):
         script = yaml.safe_load(WORKFLOW.read_text())["jobs"]["classify"]["steps"]
         script = next(s for s in script if s["name"] == "Classify")["run"]
         repo = Path(__file__).resolve().parents[1]
-        script = (script.replace("/tmp/pr_risk.py", str(repo / "scripts/pr_risk.py"))
-                        .replace("/tmp/pr-risk-prompt.md", str(repo / ".github/workflows/pr-risk/classify-prompt.md")))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "llm_credentials.sh").write_text('echo "$@" > "$FAKE_CREDENTIALS_LOG"\n')
+            script = (script.replace("/tmp/pr_risk.py", str(repo / "scripts/pr_risk.py"))
+                            .replace("/tmp/pr-risk-prompt.md", str(repo / ".github/workflows/pr-risk/classify-prompt.md"))
+                            .replace("/tmp/llm_credentials.sh", str(root / "llm_credentials.sh")))
             work = root / "work"
             work.mkdir()
             (work / "input.md").write_text("# Pull request\n")
@@ -395,15 +397,17 @@ class PRRiskTests(unittest.TestCase):
             (root / "bin/pi").chmod(0o755)
             (root / "events.jsonl").write_text(pi_events(json.dumps(VERDICT)))
             env = {"PATH": f"{root / 'bin'}:{os.environ['PATH']}", "WORKDIR": str(work),
-                   "MODEL": "openai/some-model", "OPENAI_API_KEY": "sk-test",
+                   "MODEL": "openai/some-model", "FAKE_CREDENTIALS_LOG": str(root / "credentials.log"),
                    "FAKE_PI_LOG": str(root / "pi.json"), "FAKE_PI_EVENTS": str(root / "events.jsonl")}
             subprocess.run(["bash", "-c", script], env=env, check=True)
             call = json.loads((root / "pi.json").read_text())
+            credentials = (root / "credentials.log").read_text()
             result = json.loads((work / "result.json").read_text())
 
             empty = subprocess.run(["bash", "-c", script], env={**env, "MODEL": ""}, capture_output=True, text=True)
         self.assertNotEqual(empty.returncode, 0)
         self.assertIn("PI_PREFERRED_MODEL", empty.stderr)
+        self.assertEqual(credentials, "start openai\n")
         self.assertEqual(result, {"is_error": False, "result": json.dumps(VERDICT), "structured_output": VERDICT})
         self.assertEqual(call["stdin"], "# Pull request\n")
         self.assertEqual(call["cwd"], str(work / "cwd"))

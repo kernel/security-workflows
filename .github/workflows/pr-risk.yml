@@ -13,6 +13,9 @@ name: PR Risk
 # Credentials are split by step. The model runs with no tools and no GitHub token, reading
 # only the PR data gathered with the caller's read-only token. The kernel-internal token is
 # minted after the model has finished, scoped to this repo and to pull-request writes.
+# The model provider's credentials come from workload identity federation: the job's GitHub
+# OIDC token is exchanged for short-lived provider credentials, so callers pass no API keys
+# but must grant `id-token: write`.
 
 on:
   workflow_call:
@@ -39,7 +42,8 @@ on:
         required: true
       ADMIN_APP_PRIVATE_KEY:
         required: true
-      # Pass the key for the model's provider. Both are optional so either provider works.
+      # Ignored. Declared so callers that still pass them keep working; remove them from the
+      # callers, then from here.
       ANTHROPIC_API_KEY:
         required: false
       OPENAI_API_KEY:
@@ -53,6 +57,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # For llm_credentials.sh to exchange the job's OIDC token for model credentials.
+      id-token: write
     concurrency:
       group: pr-risk-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -60,6 +66,14 @@ jobs:
       REPO: ${{ github.repository }}
       NUMBER: ${{ github.event.pull_request.number }}
       WORKDIR: /tmp/pr-risk
+      # Not secrets: they name the federation rules that this org's GitHub OIDC tokens match.
+      ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      ANTHROPIC_IDENTITY_TOKEN_FILE: /tmp/anthropic-identity-token
+      OPENAI_IDENTITY_PROVIDER_ID: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+      OPENAI_SERVICE_ACCOUNT_ID: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+      OPENAI_WIF_AUDIENCE: ${{ vars.OPENAI_WIF_AUDIENCE }}
     steps:
       - name: Fetch classifier
         env:
@@ -69,6 +83,7 @@ jobs:
           base="https://raw.githubusercontent.com/kernel/security-workflows/$REF"
           curl -fsSL "$base/scripts/pr_risk.py" -o /tmp/pr_risk.py
           curl -fsSL "$base/.github/workflows/pr-risk/classify-prompt.md" -o /tmp/pr-risk-prompt.md
+          curl -fsSL "$base/scripts/llm_credentials.sh" -o /tmp/llm_credentials.sh
 
       - name: Gather
         id: gather
@@ -94,14 +109,13 @@ jobs:
       - name: Classify
         if: steps.gather.outputs.eligible == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MODEL: ${{ inputs.model }}
           PI_SKIP_VERSION_CHECK: '1'
           PI_TELEMETRY: '0'
         run: |
           set -euo pipefail
           : "${MODEL:?Set the PI_PREFERRED_MODEL organization variable or the model input}"
+          bash /tmp/llm_credentials.sh start "${MODEL%%/*}"
           # An empty directory, and no context files or project settings, so nothing but the
           # prompt and the PR data reaches the model.
           mkdir -p "$WORKDIR/cwd" && cd "$WORKDIR/cwd"

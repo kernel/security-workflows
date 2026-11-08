@@ -8,6 +8,8 @@ on:
       - .github/workflows/pr-risk/**
       - scripts/pr_risk.py
       - scripts/test_pr_risk.py
+      - scripts/llm_credentials.sh
+      - scripts/test_llm_credentials.py
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - .github/workflows/pr-risk/**
       - scripts/pr_risk.py
       - scripts/test_pr_risk.py
+      - scripts/llm_credentials.sh
+      - scripts/test_llm_credentials.py
 
 permissions:
   contents: read
@@ -29,3 +33,4 @@ jobs:
           python3 -m venv /tmp/pr-risk-tests
           /tmp/pr-risk-tests/bin/pip install PyYAML==6.0.3
           /tmp/pr-risk-tests/bin/python -m unittest discover -s scripts -p test_pr_risk.py
+          /tmp/pr-risk-tests/bin/python -m unittest discover -s scripts -p test_llm_credentials.py
