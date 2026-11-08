@@ -5,7 +5,10 @@ import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parent / "llm_credentials.sh"
+import yaml
+
+ACTION = Path(__file__).resolve().parents[1] / ".github/actions/llm-credentials"
+SCRIPT = ACTION / "llm_credentials.sh"
 
 # Stands in for curl: GitHub's OIDC endpoint returns a token naming its audience, and OpenAI's
 # token endpoint returns an access token naming the GitHub token it was given.
@@ -64,6 +67,44 @@ class LlmCredentialsTest(unittest.TestCase):
         for provider in ("openai", "anthropic"):
             self.assertNotEqual(self.run_script("refresh", provider, FAKE_CURL_FAIL="1").returncode, 0)
         self.assertEqual({p: p.read_text() for p in before}, before)
+
+    def run_action(self, model, **overrides):
+        step = yaml.safe_load((ACTION / "action.yml").read_text())["runs"]["steps"][0]
+        fake = self.root / "fake-action"
+        fake.mkdir(exist_ok=True)
+        (fake / "llm_credentials.sh").write_text('echo "$@" > "$FAKE_CREDENTIALS_LOG"\n')
+        env = {name: "id-" + name for name in step["env"]}
+        env.update(PATH=os.environ["PATH"], MODEL=model, GITHUB_ACTION_PATH=str(fake),
+                   GITHUB_ENV=str(self.root / "github-env"), FAKE_CREDENTIALS_LOG=str(self.root / "calls"))
+        env.update(overrides)
+        result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+        read = lambda name: (self.root / name).read_text() if (self.root / name).exists() else ""
+        return result, read("calls"), read("github-env")
+
+    def test_action_starts_the_model_provider(self):
+        _, calls, github_env = self.run_action("anthropic/claude-x")
+        self.assertEqual(calls, "start anthropic\n")
+        # Later steps run pi, whose Anthropic SDK needs the federation settings.
+        self.assertEqual(github_env.splitlines(), [
+            f"{name}=id-{name}" for name in ("ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+                                             "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE")])
+
+        (self.root / "github-env").unlink()
+        _, calls, github_env = self.run_action("openai/gpt-x")
+        self.assertEqual(calls, "start openai\n")
+        self.assertEqual(github_env, "")
+
+    def test_action_requires_a_model(self):
+        result, calls, _ = self.run_action("")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("model input", result.stderr)
+        self.assertEqual(calls, "")
+
+    def test_action_requires_anthropic_ids(self):
+        result, calls, _ = self.run_action("anthropic/claude-x", ANTHROPIC_FEDERATION_RULE_ID="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("anthropic-federation-rule-id", result.stderr)
+        self.assertEqual(calls, "")
 
     def test_unknown_provider_fails(self):
         result = self.run_script("start", "google")

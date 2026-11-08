@@ -8,7 +8,7 @@ on:
       - .github/workflows/pr-risk/**
       - scripts/pr_risk.py
       - scripts/test_pr_risk.py
-      - scripts/llm_credentials.sh
+      - .github/actions/llm-credentials/**
       - scripts/test_llm_credentials.py
   push:
     branches: [main]
@@ -18,7 +18,7 @@ on:
       - .github/workflows/pr-risk/**
       - scripts/pr_risk.py
       - scripts/test_pr_risk.py
-      - scripts/llm_credentials.sh
+      - .github/actions/llm-credentials/**
       - scripts/test_llm_credentials.py
 
 permissions:

@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      # For llm_credentials.sh to exchange the job's OIDC token for model credentials.
+      # For the llm-credentials action to exchange the job's OIDC token for model credentials.
       id-token: write
     concurrency:
       group: pr-risk-${{ github.repository }}-${{ github.event.pull_request.number }}
@@ -66,14 +66,6 @@ jobs:
       REPO: ${{ github.repository }}
       NUMBER: ${{ github.event.pull_request.number }}
       WORKDIR: /tmp/pr-risk
-      # Not secrets: they name the federation rules that this org's GitHub OIDC tokens match.
-      ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
-      ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
-      ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
-      ANTHROPIC_IDENTITY_TOKEN_FILE: /tmp/anthropic-identity-token
-      OPENAI_IDENTITY_PROVIDER_ID: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
-      OPENAI_SERVICE_ACCOUNT_ID: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
-      OPENAI_WIF_AUDIENCE: ${{ vars.OPENAI_WIF_AUDIENCE }}
     steps:
       - name: Fetch classifier
         env:
@@ -83,7 +75,6 @@ jobs:
           base="https://raw.githubusercontent.com/kernel/security-workflows/$REF"
           curl -fsSL "$base/scripts/pr_risk.py" -o /tmp/pr_risk.py
           curl -fsSL "$base/.github/workflows/pr-risk/classify-prompt.md" -o /tmp/pr-risk-prompt.md
-          curl -fsSL "$base/scripts/llm_credentials.sh" -o /tmp/llm_credentials.sh
 
       - name: Gather
         id: gather
@@ -106,6 +97,19 @@ jobs:
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
+      # `uses` can't take an expression, so this follows main rather than security-workflows-ref.
+      - name: Model credentials
+        if: steps.gather.outputs.eligible == 'true'
+        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        with:
+          model: ${{ inputs.model }}
+          anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+
       - name: Classify
         if: steps.gather.outputs.eligible == 'true'
         env:
@@ -115,7 +119,6 @@ jobs:
         run: |
           set -euo pipefail
           : "${MODEL:?Set the PI_PREFERRED_MODEL organization variable or the model input}"
-          bash /tmp/llm_credentials.sh start "${MODEL%%/*}"
           # An empty directory, and no context files or project settings, so nothing but the
           # prompt and the PR data reaches the model.
           mkdir -p "$WORKDIR/cwd" && cd "$WORKDIR/cwd"

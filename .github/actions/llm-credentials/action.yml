@@ -1,0 +1,58 @@
+name: LLM credentials
+description: >-
+  Short-lived Anthropic or OpenAI credentials for pi through workload identity federation, so
+  the job needs no stored API key. The job needs `permissions: id-token: write`. Credentials are
+  refreshed every minute until the job ends; later steps run pi with no key in their env.
+
+inputs:
+  model:
+    description: Pi model as provider/id. Its provider, anthropic or openai, picks the credentials.
+    required: true
+  # The federation IDs are not secrets: they name the provider-side rules that this org's GitHub
+  # OIDC tokens match. Pass the kernel org variables; action metadata can't read `vars` itself.
+  # Only the model's provider's IDs are needed.
+  anthropic-federation-rule-id:
+    description: Anthropic federation rule ID (fdrl_...)
+  anthropic-organization-id:
+    description: Anthropic organization ID
+  anthropic-service-account-id:
+    description: Anthropic service account ID (svac_...)
+  openai-identity-provider-id:
+    description: OpenAI workload identity provider ID (idp_...)
+  openai-service-account-id:
+    description: OpenAI service account ID
+  openai-audience:
+    description: Audience the OpenAI workload identity provider requires
+
+runs:
+  using: composite
+  steps:
+    - name: Start credential refresh
+      shell: bash
+      env:
+        MODEL: ${{ inputs.model }}
+        ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic-federation-rule-id }}
+        ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic-organization-id }}
+        ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic-service-account-id }}
+        ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/anthropic-identity-token
+        OPENAI_IDENTITY_PROVIDER_ID: ${{ inputs.openai-identity-provider-id }}
+        OPENAI_SERVICE_ACCOUNT_ID: ${{ inputs.openai-service-account-id }}
+        OPENAI_WIF_AUDIENCE: ${{ inputs.openai-audience }}
+      run: |
+        set -euo pipefail
+        : "${MODEL:?Set the model input to a pi model as provider/id}"
+        provider=${MODEL%%/*}
+        if [ "$provider" = anthropic ]; then
+          : "${ANTHROPIC_FEDERATION_RULE_ID:?Set the anthropic-federation-rule-id input}"
+          : "${ANTHROPIC_ORGANIZATION_ID:?Set the anthropic-organization-id input}"
+          : "${ANTHROPIC_SERVICE_ACCOUNT_ID:?Set the anthropic-service-account-id input}"
+        fi
+        bash "$GITHUB_ACTION_PATH/llm_credentials.sh" start "$provider"
+        # The Anthropic SDK in pi does the exchange itself, so later steps need the federation
+        # settings. OpenAI's token is already in pi's auth.json.
+        if [ "$provider" = anthropic ]; then
+          for name in ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
+              ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_IDENTITY_TOKEN_FILE; do
+            echo "$name=${!name}" >> "$GITHUB_ENV"
+          done
+        fi

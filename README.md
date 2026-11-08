@@ -99,9 +99,42 @@ jobs:
 ```
 
 The model defaults to the `PI_PREFERRED_MODEL` variable and can be overridden with the `model`
-input. It must be an `anthropic/` or `openai/` model. There is no API key to pass:
-`scripts/llm_credentials.sh` exchanges the job's GitHub OIDC token for short-lived provider
-credentials through workload identity federation, which is why the caller grants `id-token: write`.
+input. It must be an `anthropic/` or `openai/` model. There is no API key to pass: the
+[`llm-credentials`](#llm-credentials-action) action exchanges the job's GitHub OIDC token for
+short-lived provider credentials, which is why the caller grants `id-token: write`.
+
+## Actions
+
+### `llm-credentials` action
+
+Gives pi short-lived Anthropic or OpenAI credentials through workload identity federation, so a
+job needs no stored API key. It refreshes them every minute until the job ends, so long agent runs
+keep working past the five-minute life of a GitHub OIDC token.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+steps:
+  - uses: kernel/security-workflows/.github/actions/llm-credentials@main
+    with:
+      model: ${{ vars.PI_PREFERRED_MODEL }}
+      anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+      openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+      openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+  - env:
+      PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
+    run: pi --print --model "$PI_PREFERRED_MODEL" ...  # no ANTHROPIC_API_KEY or OPENAI_API_KEY
+```
+
+The federation IDs come from the org variables listed under [Required variables](#required-variables).
+An action can't read `vars` itself, so the caller passes them; only the model's provider's IDs are
+used.
+Don't also set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the pi step: a key takes precedence over
+federation.
 
 ## Enrollment
 
@@ -149,5 +182,5 @@ Consumer repos need these variables (set at org or repo level):
 - `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Pi)
 - `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
   `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_WIF_AUDIENCE` — workload
-  identity federation for `pr-risk.yml`, set at the org level
+  identity federation for the `llm-credentials` action, set at the org level
 - `CURSOR_PREFERRED_MODEL` — model for the other Cursor agent invocations
