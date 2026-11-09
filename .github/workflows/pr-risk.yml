@@ -13,6 +13,9 @@ name: PR Risk
 # Credentials are split by step. The model runs with no tools and no GitHub token, reading
 # only the PR data gathered with the caller's read-only token. The kernel-internal token is
 # minted after the model has finished, scoped to this repo and to pull-request writes.
+# The model provider's credentials come from workload identity federation: the job's GitHub
+# OIDC token is exchanged for short-lived provider credentials, so callers pass no API keys
+# but must grant `id-token: write`.
 
 on:
   workflow_call:
@@ -39,7 +42,8 @@ on:
         required: true
       ADMIN_APP_PRIVATE_KEY:
         required: true
-      # Pass the key for the model's provider. Both are optional so either provider works.
+      # Ignored. Declared so callers that still pass them keep working; remove them from the
+      # callers, then from here.
       ANTHROPIC_API_KEY:
         required: false
       OPENAI_API_KEY:
@@ -53,6 +57,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # For the llm-credentials action to exchange the job's OIDC token for model credentials.
+      id-token: write
     concurrency:
       group: pr-risk-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -91,17 +97,40 @@ jobs:
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
+      # Checked out rather than referenced as kernel/security-workflows/...@<ref>, because `uses`
+      # can't take an expression and the action must follow security-workflows-ref like the
+      # classifier script does.
+      - name: Fetch credentials action
+        id: credentials-action
+        if: steps.gather.outputs.eligible == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: kernel/security-workflows
+          ref: ${{ inputs.security-workflows-ref }}
+          path: .security-workflows
+          sparse-checkout: .github/actions/llm-credentials
+          persist-credentials: false
+
+      - name: Model credentials
+        if: steps.gather.outputs.eligible == 'true'
+        uses: ./.security-workflows/.github/actions/llm-credentials
+        with:
+          model: ${{ inputs.model }}
+          anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+
       - name: Classify
         if: steps.gather.outputs.eligible == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MODEL: ${{ inputs.model }}
           PI_SKIP_VERSION_CHECK: '1'
           PI_TELEMETRY: '0'
         run: |
           set -euo pipefail
-          : "${MODEL:?Set the PI_PREFERRED_MODEL organization variable or the model input}"
           # An empty directory, and no context files or project settings, so nothing but the
           # prompt and the PR data reaches the model.
           mkdir -p "$WORKDIR/cwd" && cd "$WORKDIR/cwd"
@@ -110,6 +139,14 @@ jobs:
             --system-prompt /tmp/pr-risk-prompt.md \
             < "$WORKDIR/input.md" > "$WORKDIR/pi-events.jsonl"
           python3 /tmp/pr_risk.py verdict --dir "$WORKDIR"
+
+      # Before the app's private key reaches a third-party action, so no model credential is on
+      # disk or still being refreshed from here on. Also prints the refresh log.
+      - name: Stop model credentials
+        if: ${{ always() && steps.credentials-action.outcome == 'success' }}
+        uses: ./.security-workflows/.github/actions/llm-credentials
+        with:
+          stop: true
 
       - name: Generate app token
         id: app-token

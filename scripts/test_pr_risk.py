@@ -357,11 +357,26 @@ class PRRiskTests(unittest.TestCase):
     def test_workflow_isolates_the_model(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         job = workflow["jobs"]["classify"]
-        self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
+        self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read", "id-token": "write"})
+        self.assertNotIn("secrets.", json.dumps(job["env"]))
         steps = {s["name"]: s for s in job["steps"]}
         classify = steps["Classify"]
-        self.assertEqual(set(classify["env"]), {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MODEL",
-                                                "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY"})
+        self.assertEqual(set(classify["env"]), {"MODEL", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY"})
+        action = "./.security-workflows/.github/actions/llm-credentials"
+        fetch = steps["Fetch credentials action"]
+        self.assertEqual(fetch["with"]["ref"], "${{ inputs.security-workflows-ref }}")
+        self.assertEqual(fetch["with"]["path"], ".security-workflows")
+        self.assertFalse(fetch["with"]["persist-credentials"])
+        credentials = steps["Model credentials"]
+        self.assertEqual(credentials["uses"], action)
+        self.assertEqual(credentials["with"]["model"], "${{ inputs.model }}")
+        self.assertNotIn("secrets.", json.dumps(credentials["with"]))
+        self.assertEqual(credentials["if"], classify["if"])
+        self.assertEqual(fetch["if"], classify["if"])
+        stop = steps["Stop model credentials"]
+        self.assertEqual(stop["uses"], action)
+        self.assertEqual(stop["with"], {"stop": True})
+        self.assertIn("always()", stop["if"])
         self.assertEqual(classify["env"]["MODEL"], "${{ inputs.model }}")
         for flag in ("--no-tools", "--no-mcp", "--no-extensions", "--no-skills", "--no-prompt-templates",
                      "--no-context-files", "--no-approve", "--no-session"):
@@ -369,7 +384,9 @@ class PRRiskTests(unittest.TestCase):
         self.assertNotIn("--approve ", classify["run"])
         self.assertNotIn("GH_TOKEN", json.dumps({k: steps[k] for k in ("Install Pi", "Classify")}))
         names = list(steps)
-        self.assertLess(names.index("Classify"), names.index("Generate app token"))
+        order = ["Fetch credentials action", "Model credentials", "Classify", "Stop model credentials",
+                 "Generate app token"]
+        self.assertEqual(order, sorted(order, key=names.index))
         self.assertEqual(steps["Generate app token"]["with"]["permission-pull-requests"], "write")
         self.assertEqual(steps["Gather"]["env"]["GH_TOKEN"], "${{ github.token }}")
         triggers = workflow[True]["workflow_call"]
@@ -395,15 +412,11 @@ class PRRiskTests(unittest.TestCase):
             (root / "bin/pi").chmod(0o755)
             (root / "events.jsonl").write_text(pi_events(json.dumps(VERDICT)))
             env = {"PATH": f"{root / 'bin'}:{os.environ['PATH']}", "WORKDIR": str(work),
-                   "MODEL": "openai/some-model", "OPENAI_API_KEY": "sk-test",
+                   "MODEL": "openai/some-model",
                    "FAKE_PI_LOG": str(root / "pi.json"), "FAKE_PI_EVENTS": str(root / "events.jsonl")}
             subprocess.run(["bash", "-c", script], env=env, check=True)
             call = json.loads((root / "pi.json").read_text())
             result = json.loads((work / "result.json").read_text())
-
-            empty = subprocess.run(["bash", "-c", script], env={**env, "MODEL": ""}, capture_output=True, text=True)
-        self.assertNotEqual(empty.returncode, 0)
-        self.assertIn("PI_PREFERRED_MODEL", empty.stderr)
         self.assertEqual(result, {"is_error": False, "result": json.dumps(VERDICT), "structured_output": VERDICT})
         self.assertEqual(call["stdin"], "# Pull request\n")
         self.assertEqual(call["cwd"], str(work / "cwd"))

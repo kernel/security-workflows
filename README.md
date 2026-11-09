@@ -86,6 +86,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  id-token: write
 jobs:
   classify:
     uses: kernel/security-workflows/.github/workflows/pr-risk.yml@main
@@ -95,12 +96,51 @@ jobs:
     secrets:
       ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
       ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
 The model defaults to the `PI_PREFERRED_MODEL` variable and can be overridden with the `model`
-input. Pass the API key for that model's provider; both keys are optional secrets.
+input. It must be an `anthropic/` or `openai/` model. There is no API key to pass: the
+[`llm-credentials`](#llm-credentials-action) action exchanges the job's GitHub OIDC token for
+short-lived provider credentials, which is why the caller grants `id-token: write`.
+
+## Actions
+
+### `llm-credentials` action
+
+Gives pi short-lived Anthropic or OpenAI credentials through workload identity federation, so a
+job needs no stored API key. It refreshes them every 30 seconds in the background, so long agent
+runs keep working past the five-minute life of a GitHub OIDC token. Run it again with `stop: true`
+once the model is done: that stops the refresh, deletes the credentials, and prints the refresh
+log, which is where a mid-run refresh failure shows up.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+steps:
+  - uses: kernel/security-workflows/.github/actions/llm-credentials@main
+    with:
+      model: ${{ vars.PI_PREFERRED_MODEL }}
+      anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+      openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+      openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+  - env:
+      PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
+    run: pi --print --model "$PI_PREFERRED_MODEL" ...  # no ANTHROPIC_API_KEY or OPENAI_API_KEY
+  - if: always()
+    uses: kernel/security-workflows/.github/actions/llm-credentials@main
+    with:
+      stop: true
+```
+
+The federation IDs come from the org variables listed under [Required variables](#required-variables).
+An action can't read `vars` itself, so the caller passes them; only the model's provider's IDs are
+used.
+Don't also set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the pi step: a key takes precedence over
+federation. For OpenAI the action sets only the `openai` entry of pi's `auth.json`.
 
 ## Enrollment
 
@@ -135,7 +175,7 @@ projectIgnorePaths:
 
 Consumer repos need these secrets (set at org or repo level):
 
-- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Pi) and the `pr-risk.yml` classifier (Claude Code)
+- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Pi)
 - `OPENAI_API_KEY` — for the `semgrep.yml` triage agent (Pi), when `PI_PREFERRED_MODEL` is an OpenAI model
 - `CURSOR_API_KEY` — for the other fix/remediation agents (Cursor)
 - `ADMIN_APP_ID` + `ADMIN_APP_PRIVATE_KEY` — GitHub App for write access
@@ -145,6 +185,8 @@ Consumer repos need these secrets (set at org or repo level):
 
 Consumer repos need these variables (set at org or repo level):
 
-- `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent (Pi)
-- `CLAUDE_CODE_PREFERRED_MODEL` — model for the `pr-risk.yml` classifier (Claude Code)
+- `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Pi)
+- `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
+  `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_WIF_AUDIENCE` — workload
+  identity federation for the `llm-credentials` action, set at the org level
 - `CURSOR_PREFERRED_MODEL` — model for the other Cursor agent invocations
