@@ -47,14 +47,15 @@ class ContainerRemediationTests(unittest.TestCase):
             for step in job["steps"]:
                 if "uses" not in step:
                     continue
-                self.assertRegex(step["uses"], r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+                # The credentials action is this repo's own, checked out at security-workflows-ref.
+                self.assertRegex(step["uses"], r"^([\w.-]+/[\w.-]+@[0-9a-f]{40}|\./\.security-workflows/\.github/actions/llm-credentials)$")
                 if step["uses"].startswith("actions/checkout@"):
                     self.assertIs(step["with"]["persist-credentials"], False)
                     self.assertNotIn("token", step["with"])
 
     def test_agent_jobs_have_read_only_credentials(self):
         for job, agent in (("triage", "Triage findings"), ("fix", "Apply fixes")):
-            self.assertEqual(self.jobs[job]["permissions"], {"contents": "read"})
+            self.assertEqual(self.jobs[job]["permissions"], {"contents": "read", "id-token": "write"})
             step = self.step(job, agent)
             self.assertIn("pi --print --no-session --approve", step["run"])
             self.assertIn('--model "$PI_PREFERRED_MODEL"', step["run"])
@@ -65,9 +66,10 @@ class ContainerRemediationTests(unittest.TestCase):
                 self.assertNotIn("claude", yaml.safe_dump(step))
                 self.assertNotRegex(yaml.safe_dump(step.get("with", {})), r"permission-[\w-]+: write")
 
-    def test_agent_jobs_reference_only_model_secrets(self):
+    def test_agent_jobs_reference_no_secrets(self):
         # A job's secrets stay in runner memory for the whole job, where an agent
-        # with sudo can read them, so revoking a minted token is not enough.
+        # with sudo can read them, so revoking a minted token is not enough. Model
+        # access comes from short-lived federated credentials instead.
         agent_jobs = {
             name for name, job in self.jobs.items()
             if any("pi --print" in s.get("run", "") for s in job["steps"])
@@ -75,7 +77,22 @@ class ContainerRemediationTests(unittest.TestCase):
         self.assertEqual(agent_jobs, {"triage", "fix"})
         for name in agent_jobs:
             refs = re.findall(r"\bsecrets\b(?:\.(\w+))?", yaml.safe_dump(self.jobs[name]))
-            self.assertLessEqual(set(refs), {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}, name)
+            self.assertEqual(refs, [], name)
+
+    def test_model_credentials_exist_only_while_the_agent_runs(self):
+        action = "./.security-workflows/.github/actions/llm-credentials"
+        for job, agent in (("triage", "Triage findings"), ("fix", "Apply fixes")):
+            fetch = self.step(job, "Fetch credentials action")
+            self.assertEqual(fetch["with"]["ref"], "${{ inputs.security-workflows-ref }}")
+            self.assertEqual(fetch["with"]["sparse-checkout"], ".github/actions/llm-credentials")
+            self.assertIn("/.security-workflows/", self.step(job, "Keep the credentials action out of the agent's changes")["run"])
+            start, stop = self.step(job, "Model credentials"), self.step(job, "Stop model credentials")
+            self.assertEqual((start["uses"], stop["uses"]), (action, action))
+            self.assertEqual(start["with"]["model"], "${{ vars.PI_PREFERRED_MODEL }}")
+            self.assertEqual(stop["with"], {"stop": True})
+            self.assertIn("always()", stop["if"])
+            self.assertEqual(self.index(job, "Model credentials") + 1, self.index(job, agent))
+            self.assertEqual(self.index(job, agent) + 1, self.index(job, "Stop model credentials"))
 
     def test_private_modules_are_fetched_in_a_separate_job(self):
         mint = self.step("go-modules", "Generate Go module read token")
