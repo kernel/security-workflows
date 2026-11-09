@@ -1,0 +1,16 @@
+name: pr-risk-wif-livetest
+on:
+  pull_request:
+    branches: [hypeship/llm-credentials-livetest]
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+jobs:
+  classify:
+    uses: ./.github/workflows/pr-risk.yml
+    with:
+      security-workflows-ref: hypeship/llm-credentials-livetest
+    secrets:
+      ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
+      ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
