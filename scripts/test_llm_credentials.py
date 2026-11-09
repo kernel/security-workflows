@@ -131,6 +131,32 @@ class LlmCredentialsTest(unittest.TestCase):
         self.assertFalse(self.token_file.exists())
         self.assertFalse((self.root / "llm-credentials.pid").exists())
 
+    def test_second_start_replaces_the_first_loop(self):
+        self.addCleanup(self.run_script, "stop")
+        self.assertEqual(self.run_script("start", "anthropic", LLM_CREDENTIALS_INTERVAL="1").returncode, 0)
+        first = int((self.root / "llm-credentials.pid").read_text())
+        self.assertEqual(self.run_script("start", "anthropic", LLM_CREDENTIALS_INTERVAL="1").returncode, 0)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(first, 0)
+        self.assertEqual(self.run_script("stop").returncode, 0)
+        time.sleep(1.5)
+        self.assertFalse(self.token_file.exists())
+
+    def test_invalid_auth_json_is_an_error(self):
+        self.auth.parent.mkdir()
+        self.auth.write_text("not json")
+        self.assertNotEqual(self.run_script("refresh", "openai").returncode, 0)
+        stopped = self.run_script("stop")
+        self.assertNotEqual(stopped.returncode, 0)
+        self.assertIn("not valid JSON", stopped.stderr)
+        self.assertEqual(self.auth.read_text(), "not json")
+
+    def test_empty_auth_json_gets_the_openai_entry(self):
+        self.auth.parent.mkdir()
+        self.auth.write_text("")
+        self.assertEqual(self.run_script("refresh", "openai").returncode, 0)
+        self.assertIn("openai", json.loads(self.auth.read_text()))
+
     def test_stop_removes_openai_entry_and_prints_log(self):
         self.auth.parent.mkdir()
         self.auth.write_text(json.dumps({"anthropic": {"type": "api_key", "key": "other"},

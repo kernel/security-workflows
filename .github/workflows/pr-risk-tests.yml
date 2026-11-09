@@ -48,5 +48,8 @@ jobs:
           tar -xzf "$tarball" actionlint
           shellcheck --version
           shellcheck .github/actions/llm-credentials/llm_credentials.sh
+          # actionlint doesn't check the `run` block of a composite action.
+          yq '.runs.steps[0].run' .github/actions/llm-credentials/action.yml > "$RUNNER_TEMP/action-run.sh"
+          shellcheck --shell=bash "$RUNNER_TEMP/action-run.sh"
           # actionlint also runs shellcheck on each `run` block.
           ./actionlint .github/workflows/pr-risk.yml .github/workflows/pr-risk-tests.yml

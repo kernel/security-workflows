@@ -59,8 +59,12 @@ refresh_openai() {
     curl -fsS --retry 3 https://auth.openai.com/oauth/token -H 'Content-Type: application/json' -d @- |
     jq -re .access_token) || return 1
   mkdir -p "$(dirname "$auth")" || return 1
-  current=$(cat "$auth" 2>/dev/null || echo '{}')
-  current=$(jq --arg key "$access" '.openai = {type: "api_key", key: $key}' <<<"$current") || return 1
+  current='{}'
+  if [ -s "$auth" ]; then
+    current=$(cat "$auth") || return 1
+  fi
+  # A file that isn't valid JSON is an error rather than something to overwrite.
+  current=$(jq -e --arg key "$access" '.openai = {type: "api_key", key: $key}' <<<"$current") || return 1
   write "$auth" "$current"
 }
 
@@ -71,7 +75,7 @@ refresh() {
   esac
 }
 
-stop() {
+stop_loop() {
   local group _
   if [ -f "$pidfile" ]; then
     # The loop leads its own process group, so this also stops a refresh in flight before the
@@ -85,24 +89,36 @@ stop() {
     kill -KILL -- "-$group" 2>/dev/null || true
     rm -f "$pidfile"
   fi
+}
+
+stop() {
+  local status=0 updated
+  stop_loop
   if [ -n "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ]; then
     rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp"
   fi
   rm -f "$auth.tmp"
-  if [ -f "$auth" ]; then
-    write "$auth" "$(jq 'del(.openai)' "$auth")"
+  if [ -s "$auth" ]; then
+    if updated=$(jq -e 'del(.openai)' "$auth"); then
+      write "$auth" "$updated"
+    else
+      echo "$auth is not valid JSON; left it as is" >&2
+      status=1
+    fi
   fi
   if [ -s "$log" ]; then
     echo "Credential refresh log:"
     cat "$log"
   fi
+  return "$status"
 }
 
 usage="usage: llm_credentials.sh start|refresh <anthropic|openai> | stop"
 case "${1:-}" in
   start)
+    # A second start replaces the first loop rather than orphaning it.
+    stop_loop
     refresh "${2:?$usage}"
-    rm -f "$pidfile"
     setsid bash "${BASH_SOURCE[0]}" loop "$2" </dev/null >>"$log" 2>&1 &
     for _ in $(seq 50); do
       [ -s "$pidfile" ] && exit 0
