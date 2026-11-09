@@ -43,6 +43,8 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-24.04
+    # Resolved in the caller's repo, so the ECR role sees repo:<caller>:environment:aws-ci.
+    environment: aws-ci
     permissions:
       contents: read
       id-token: write
