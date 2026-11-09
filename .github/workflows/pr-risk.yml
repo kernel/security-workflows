@@ -97,10 +97,23 @@ jobs:
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
-      # `uses` can't take an expression, so this follows main rather than security-workflows-ref.
+      # Checked out rather than referenced as kernel/security-workflows/...@<ref>, because `uses`
+      # can't take an expression and the action must follow security-workflows-ref like the
+      # classifier script does.
+      - name: Fetch credentials action
+        id: credentials-action
+        if: steps.gather.outputs.eligible == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: kernel/security-workflows
+          ref: ${{ inputs.security-workflows-ref }}
+          path: .security-workflows
+          sparse-checkout: .github/actions/llm-credentials
+          persist-credentials: false
+
       - name: Model credentials
         if: steps.gather.outputs.eligible == 'true'
-        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        uses: ./.security-workflows/.github/actions/llm-credentials
         with:
           model: ${{ inputs.model }}
           anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -118,7 +131,6 @@ jobs:
           PI_TELEMETRY: '0'
         run: |
           set -euo pipefail
-          : "${MODEL:?Set the PI_PREFERRED_MODEL organization variable or the model input}"
           # An empty directory, and no context files or project settings, so nothing but the
           # prompt and the PR data reaches the model.
           mkdir -p "$WORKDIR/cwd" && cd "$WORKDIR/cwd"
@@ -127,6 +139,14 @@ jobs:
             --system-prompt /tmp/pr-risk-prompt.md \
             < "$WORKDIR/input.md" > "$WORKDIR/pi-events.jsonl"
           python3 /tmp/pr_risk.py verdict --dir "$WORKDIR"
+
+      # Before the app's private key reaches a third-party action, so no model credential is on
+      # disk or still being refreshed from here on. Also prints the refresh log.
+      - name: Stop model credentials
+        if: ${{ always() && steps.credentials-action.outcome == 'success' }}
+        uses: ./.security-workflows/.github/actions/llm-credentials
+        with:
+          stop: true
 
       - name: Generate app token
         id: app-token

@@ -34,3 +34,19 @@ jobs:
           /tmp/pr-risk-tests/bin/pip install PyYAML==6.0.3
           /tmp/pr-risk-tests/bin/python -m unittest discover -s scripts -p test_pr_risk.py
           /tmp/pr-risk-tests/bin/python -m unittest discover -s scripts -p test_llm_credentials.py
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: shellcheck and actionlint
+        run: |
+          set -euo pipefail
+          tarball=actionlint_1.7.7_linux_amd64.tar.gz
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v1.7.7/$tarball"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          shellcheck --version
+          shellcheck .github/actions/llm-credentials/llm_credentials.sh
+          # actionlint also runs shellcheck on each `run` block.
+          ./actionlint .github/workflows/pr-risk.yml .github/workflows/pr-risk-tests.yml

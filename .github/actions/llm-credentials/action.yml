@@ -2,12 +2,17 @@ name: LLM credentials
 description: >-
   Short-lived Anthropic or OpenAI credentials for pi through workload identity federation, so
   the job needs no stored API key. The job needs `permissions: id-token: write`. Credentials are
-  refreshed every minute until the job ends; later steps run pi with no key in their env.
+  refreshed in the background, so later steps run pi with no key in their env. Run the action
+  again with `stop: true` once the model is done, to delete the credentials before later steps.
 
 inputs:
   model:
-    description: Pi model as provider/id. Its provider, anthropic or openai, picks the credentials.
-    required: true
+    description: >-
+      Pi model as provider/id, such as the PI_PREFERRED_MODEL variable. Its provider, anthropic or
+      openai, picks the credentials. Required unless stop is true.
+  stop:
+    description: Stop refreshing, delete the credentials and print the refresh log.
+    default: 'false'
   # The federation IDs are not secrets: they name the provider-side rules that this org's GitHub
   # OIDC tokens match. Pass the kernel org variables; action metadata can't read `vars` itself.
   # Only the model's provider's IDs are needed.
@@ -27,10 +32,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Start credential refresh
+    - name: Model credentials
       shell: bash
       env:
         MODEL: ${{ inputs.model }}
+        STOP: ${{ inputs.stop }}
         ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic-federation-rule-id }}
         ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic-organization-id }}
         ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic-service-account-id }}
@@ -40,13 +46,30 @@ runs:
         OPENAI_WIF_AUDIENCE: ${{ inputs.openai-audience }}
       run: |
         set -euo pipefail
-        : "${MODEL:?Set the model input to a pi model as provider/id}"
-        provider=${MODEL%%/*}
-        if [ "$provider" = anthropic ]; then
-          : "${ANTHROPIC_FEDERATION_RULE_ID:?Set the anthropic-federation-rule-id input}"
-          : "${ANTHROPIC_ORGANIZATION_ID:?Set the anthropic-organization-id input}"
-          : "${ANTHROPIC_SERVICE_ACCOUNT_ID:?Set the anthropic-service-account-id input}"
+        if [ "$STOP" = true ]; then
+          exec bash "$GITHUB_ACTION_PATH/llm_credentials.sh" stop
         fi
+        : "${MODEL:?Set the model input to a pi model as provider/id, such as the PI_PREFERRED_MODEL variable}"
+        provider=${MODEL%%/*}
+        # require <env name> <input name> <org variable>
+        require() {
+          if [ -z "${!1}" ]; then
+            echo "Set the $2 input from the $3 org variable. If it is set, check that the variable is visible to this repository." >&2
+            exit 1
+          fi
+        }
+        case "$provider" in
+          anthropic)
+            require ANTHROPIC_FEDERATION_RULE_ID anthropic-federation-rule-id ANTHROPIC_FEDERATION_RULE_ID
+            require ANTHROPIC_ORGANIZATION_ID anthropic-organization-id ANTHROPIC_ORGANIZATION_ID
+            require ANTHROPIC_SERVICE_ACCOUNT_ID anthropic-service-account-id ANTHROPIC_SERVICE_ACCOUNT_ID
+            ;;
+          openai)
+            require OPENAI_IDENTITY_PROVIDER_ID openai-identity-provider-id OPENAI_IDENTITY_PROVIDER_ID
+            require OPENAI_SERVICE_ACCOUNT_ID openai-service-account-id OPENAI_SERVICE_ACCOUNT_ID
+            require OPENAI_WIF_AUDIENCE openai-audience OPENAI_WIF_AUDIENCE
+            ;;
+        esac
         bash "$GITHUB_ACTION_PATH/llm_credentials.sh" start "$provider"
         # The Anthropic SDK in pi does the exchange itself, so later steps need the federation
         # settings. OpenAI's token is already in pi's auth.json.

@@ -108,8 +108,10 @@ short-lived provider credentials, which is why the caller grants `id-token: writ
 ### `llm-credentials` action
 
 Gives pi short-lived Anthropic or OpenAI credentials through workload identity federation, so a
-job needs no stored API key. It refreshes them every minute until the job ends, so long agent runs
-keep working past the five-minute life of a GitHub OIDC token.
+job needs no stored API key. It refreshes them every 30 seconds in the background, so long agent
+runs keep working past the five-minute life of a GitHub OIDC token. Run it again with `stop: true`
+once the model is done: that stops the refresh, deletes the credentials, and prints the refresh
+log, which is where a mid-run refresh failure shows up.
 
 ```yaml
 permissions:
@@ -128,13 +130,17 @@ steps:
   - env:
       PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
     run: pi --print --model "$PI_PREFERRED_MODEL" ...  # no ANTHROPIC_API_KEY or OPENAI_API_KEY
+  - if: always()
+    uses: kernel/security-workflows/.github/actions/llm-credentials@main
+    with:
+      stop: true
 ```
 
 The federation IDs come from the org variables listed under [Required variables](#required-variables).
 An action can't read `vars` itself, so the caller passes them; only the model's provider's IDs are
 used.
 Don't also set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the pi step: a key takes precedence over
-federation.
+federation. For OpenAI the action sets only the `openai` entry of pi's `auth.json`.
 
 ## Enrollment
 
