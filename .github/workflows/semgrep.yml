@@ -18,6 +18,8 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     container:
       # Pull through Google's unauthenticated Docker Hub mirror. Anonymous
       # Docker Hub pulls share the caller's runner IP rate limit and fail at
@@ -70,6 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: scan
     if: needs.scan.outputs.findings_count != '0' && fromJson(needs.scan.outputs.findings_count) > 20
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Post volume warning
         env:
@@ -91,6 +96,11 @@ jobs:
     timeout-minutes: 15
     needs: scan
     if: needs.scan.outputs.findings_count != '0' && fromJson(needs.scan.outputs.findings_count) <= 20
+    # id-token: write is only for the llm-credentials action; the other jobs don't get it.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     # The agent gets read-only file tools and no GitHub token. Runner steps gather the PR's
     # existing comments before it runs and post its validated result as one review after.
     env:
@@ -138,10 +148,19 @@ jobs:
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
+      - name: Model credentials
+        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        with:
+          model: ${{ vars.PI_PREFERRED_MODEL }}
+          anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+
       - name: Triage findings
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
           PI_SKIP_VERSION_CHECK: '1'
           PI_TELEMETRY: '0'
@@ -158,6 +177,12 @@ jobs:
             --model "$PI_PREFERRED_MODEL" --thinking max \
             @"$TRIAGE_DIR/prompt.md" > "$TRIAGE_DIR/agent-output.txt"
           cat "$TRIAGE_DIR/agent-output.txt"
+
+      - name: Stop model credentials
+        if: ${{ always() }}
+        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        with:
+          stop: true
 
       - name: Post review
         env:

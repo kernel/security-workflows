@@ -47,6 +47,10 @@ jobs:
   self-remediation:
     name: Manual self remediation
     if: github.event_name == 'workflow_dispatch' && inputs['run-live-remediation']
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
     uses: ./.github/workflows/vuln-remediation.yml
     with:
       security-workflows-ref: ${{ github.ref_name }}

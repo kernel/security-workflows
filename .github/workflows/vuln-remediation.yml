@@ -371,6 +371,10 @@ jobs:
     needs: fix
     if: needs.fix.outputs.run_agent == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For the llm-credentials action to exchange the job's OIDC token for model credentials.
+      id-token: write
     timeout-minutes: 40
     outputs:
       has_changes: ${{ steps.snapshot.outputs.has_changes }}
@@ -445,11 +449,36 @@ jobs:
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           pi --version
 
+      # Checked out rather than referenced as kernel/security-workflows/...@<ref>, because `uses`
+      # can't take an expression and the action must follow security-workflows-ref. Excluded from
+      # git so the agent's changes never include it and `git clean` keeps it for the stop step.
+      - name: Fetch credentials action
+        id: credentials-action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: kernel/security-workflows
+          ref: ${{ inputs.security-workflows-ref }}
+          path: .security-workflows
+          sparse-checkout: .github/actions/llm-credentials
+          persist-credentials: false
+
+      - name: Keep the credentials action out of the agent's changes
+        run: echo /.security-workflows/ >> .git/info/exclude
+
+      - name: Model credentials
+        uses: ./.security-workflows/.github/actions/llm-credentials
+        with:
+          model: ${{ vars.PI_PREFERRED_MODEL }}
+          anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic-organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic-service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+
       - name: Run fallback agent
         timeout-minutes: 20
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
           PI_SKIP_VERSION_CHECK: '1'
           PI_TELEMETRY: '0'
@@ -465,6 +494,12 @@ jobs:
           pi --print --no-session --approve \
             --model "$PI_PREFERRED_MODEL" --thinking max \
             @"$RUNNER_TEMP/fix-prompt.md"
+
+      - name: Stop model credentials
+        if: ${{ always() && steps.credentials-action.outcome == 'success' }}
+        uses: ./.security-workflows/.github/actions/llm-credentials
+        with:
+          stop: true
 
       - name: Snapshot agent changes
         id: snapshot
