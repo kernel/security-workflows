@@ -268,10 +268,21 @@ class WorkflowTest(unittest.TestCase):
             env = step.get("env", {})
             if "GH_TOKEN" in env:
                 self.assertIn(step["name"], ("Gather PR comments", "Post review"))
-            if any("secrets." in str(v) for v in env.values()):
-                self.assertEqual(step["name"], "Triage findings")
+            self.assertFalse(any("secrets." in str(v) for v in env.values()), step["name"])
         self.assertLess(self.names.index("Gather PR comments"), self.names.index("Triage findings"))
         self.assertLess(self.names.index("Triage findings"), self.names.index("Post review"))
+
+    def test_model_credentials_exist_only_while_the_agent_runs(self):
+        agent = self.names.index("Triage findings")
+        self.assertEqual(self.names[agent - 1], "Model credentials")
+        self.assertEqual(self.names[agent + 1], "Stop model credentials")
+        action = "kernel/security-workflows/.github/actions/llm-credentials@main"
+        self.assertEqual(self.step("Model credentials")["uses"], action)
+        self.assertEqual(self.step("Stop model credentials")["with"], {"stop": True})
+        jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        self.assertEqual(jobs["triage"]["permissions"], {"contents": "read", "pull-requests": "write", "id-token": "write"})
+        for name in ("scan", "too-many-findings"):
+            self.assertNotIn("id-token", jobs[name]["permissions"])
 
 
 if __name__ == "__main__":

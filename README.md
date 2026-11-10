@@ -34,6 +34,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write  # the fallback agent's model credentials
 jobs:
   remediate:
     uses: kernel/security-workflows/.github/workflows/vuln-remediation.yml@main
@@ -56,6 +57,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write  # the triage agent's model credentials
 jobs:
   scan:
     uses: kernel/security-workflows/.github/workflows/semgrep.yml@main
@@ -175,8 +177,6 @@ projectIgnorePaths:
 
 Consumer repos need these secrets (set at org or repo level):
 
-- `ANTHROPIC_API_KEY` — for the `semgrep.yml` triage agent (Pi)
-- `OPENAI_API_KEY` — for the `semgrep.yml` triage agent (Pi), when `PI_PREFERRED_MODEL` is an OpenAI model
 - `CURSOR_API_KEY` — for the other fix/remediation agents (Cursor)
 - `ADMIN_APP_ID` + `ADMIN_APP_PRIVATE_KEY` — GitHub App for write access
 - `SOCKET_API_TOKEN` — Socket.dev API token
@@ -185,7 +185,9 @@ Consumer repos need these secrets (set at org or repo level):
 
 Consumer repos need these variables (set at org or repo level):
 
-- `PI_PREFERRED_MODEL` — model for the `semgrep.yml` triage agent and the `pr-risk.yml` classifier (Pi)
+- `PI_PREFERRED_MODEL` — model for the Pi agents in `semgrep.yml`, `vuln-remediation.yml`,
+  `container-remediation.yml` and `pr-risk.yml`. They get model credentials from the
+  `llm-credentials` action rather than API keys, so callers grant `id-token: write`.
 - `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`,
   `OPENAI_IDENTITY_PROVIDER_ID`, `OPENAI_SERVICE_ACCOUNT_ID`, `OPENAI_WIF_AUDIENCE` — workload
   identity federation for the `llm-credentials` action, set at the org level

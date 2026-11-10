@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github/workflows/vuln-remediation.yml"
 TOKEN_REF = re.compile(r"GH_TOKEN|GITHUB_TOKEN|steps\.[\w-]+\.outputs\.token|github\.token")
-MODEL_KEYS = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+CREDENTIALS_ACTION = "./.security-workflows/.github/actions/llm-credentials"
 
 
 def load_jobs(text: str | None = None) -> dict:
@@ -72,31 +72,47 @@ class WorkflowCredentialBoundary(unittest.TestCase):
                 uses = entry.get("uses")
                 if not uses:
                     continue
-                self.assertRegex(uses, r"^[\w/-]+@[0-9a-f]{40}$", f"{job_name}: {uses}")
+                if uses != CREDENTIALS_ACTION:
+                    self.assertRegex(uses, r"^[\w/-]+@[0-9a-f]{40}$", f"{job_name}: {uses}")
                 if job_name in ("fix", "agent", "verify", "pr") and uses.startswith("actions/checkout@"):
                     self.assertIs(entry["with"]["persist-credentials"], False)
                     self.assertNotIn("token", entry["with"])
 
     def test_default_token_is_read_only(self):
         self.assertEqual(yaml.safe_load(WORKFLOW_PATH.read_text())["permissions"], {"contents": "read"})
-        for job in JOBS.values():
-            self.assertNotIn("permissions", job)
+        # Only the agent job adds anything: an OIDC token for the llm-credentials action.
+        for name, job in JOBS.items():
+            if name == "agent":
+                self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
+            else:
+                self.assertNotIn("permissions", job)
 
-    def test_agent_job_references_only_model_keys(self):
+    def test_agent_job_references_no_secrets(self):
         self.assertEqual(agent_jobs(JOBS), ["agent"])
         agent = JOBS["agent"]
-        self.assertEqual(secrets_of(agent), MODEL_KEYS)
+        self.assertEqual(secrets_of(agent), set())
         self.assertNotRegex(yaml.safe_dump(agent), TOKEN_REF)
         self.assertNotIn("create-github-app-token", yaml.safe_dump(agent))
         self.assertEqual(step("agent", "Run fallback agent")["env"]["PI_PREFERRED_MODEL"], "${{ vars.PI_PREFERRED_MODEL }}")
 
     def test_secret_check_fails_when_a_key_is_added_to_the_agent_job(self):
         text = WORKFLOW_PATH.read_text()
-        anchor = "          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
+        anchor = "          PI_TELEMETRY: '0'\n          GOPRIVATE: github.com/kernel/*\n"
         self.assertEqual(text.count(anchor), 1)
-        for leaked in ("SOCKET_API_TOKEN", "ADMIN_APP_PRIVATE_KEY"):
+        for leaked in ("SOCKET_API_TOKEN", "ADMIN_APP_PRIVATE_KEY", "OPENAI_API_KEY"):
             jobs = load_jobs(text.replace(anchor, anchor + f"          LEAK: ${{{{ secrets.{leaked} }}}}\n"))
-            self.assertNotEqual(secrets_of(jobs["agent"]), MODEL_KEYS)
+            self.assertNotEqual(secrets_of(jobs["agent"]), set())
+
+    def test_model_credentials_exist_only_while_the_agent_runs(self):
+        names = [entry.get("name") for entry in JOBS["agent"]["steps"]]
+        agent = names.index("Run fallback agent")
+        start, stop = step("agent", "Model credentials"), step("agent", "Stop model credentials")
+        self.assertEqual(names[agent - 1], "Model credentials")
+        self.assertEqual(names[agent + 1], "Stop model credentials")
+        self.assertEqual((start["uses"], stop["uses"]), (CREDENTIALS_ACTION, CREDENTIALS_ACTION))
+        self.assertEqual(step("agent", "Fetch credentials action")["with"]["ref"], "${{ inputs.security-workflows-ref }}")
+        self.assertEqual(stop["with"], {"stop": True})
+        self.assertIn("always()", stop["if"])
 
     def test_remediation_jobs_have_timeouts(self):
         for name in ("fix", "agent", "verify", "pr"):
