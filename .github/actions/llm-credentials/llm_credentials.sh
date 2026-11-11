@@ -2,10 +2,12 @@
 # Short-lived model credentials for pi in GitHub Actions, through workload identity federation
 # instead of stored API keys. The job needs `permissions: id-token: write`.
 #
-#   llm_credentials.sh start <anthropic|openai>    fetch once, then refresh in the background
-#   llm_credentials.sh refresh <anthropic|openai>  fetch once
-#   llm_credentials.sh stop                        stop refreshing, delete the credentials and
-#                                                   print the refresh log
+#   llm_credentials.sh start <provider>...    fetch once, then refresh in the background
+#   llm_credentials.sh refresh <provider>...  fetch once
+#   llm_credentials.sh stop                   stop refreshing, delete the credentials and print
+#                                              the refresh log
+#
+# Providers are anthropic, openai and openrouter.
 #
 # GitHub's OIDC tokens last about five minutes, and each provider's credential expires no later
 # than the token it was exchanged for, so a run longer than that needs the background refresh.
@@ -19,6 +21,10 @@
 # openai: exchanges a GitHub token for an OpenAI access token using OPENAI_IDENTITY_PROVIDER_ID,
 #   OPENAI_SERVICE_ACCOUNT_ID and OPENAI_WIF_AUDIENCE, and sets it as the openai entry of pi's
 #   auth.json, which pi rereads when the file changes. Other entries are kept.
+# openrouter: exchanges a GitHub token with audience $OPENROUTER_WIF_AUDIENCE (default
+#   https://openrouter.ai) for an OpenRouter access token using OPENROUTER_FEDERATION_POLICY_ID.
+#   It writes the token to $OPENROUTER_ACCESS_TOKEN_FILE for callers that read it per request, and
+#   sets it as the openrouter entry of pi's auth.json.
 set -euo pipefail
 umask 077
 
@@ -68,11 +74,38 @@ refresh_openai() {
   write "$auth" "$current"
 }
 
+refresh_openrouter() {
+  local token body access current
+  token=$(github_token "${OPENROUTER_WIF_AUDIENCE:-https://openrouter.ai}") || return 1
+  body=$(jq -rn --arg token "$token" --arg policy "${OPENROUTER_FEDERATION_POLICY_ID:?}" \
+      '{grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        federation_policy_id: $policy, subject_token: $token}
+       | to_entries | map("\(.key)=\(.value | @uri)") | join("&")') || return 1
+  access=$(printf '%s' "$body" |
+    curl -fsS --retry 3 https://openrouter.ai/api/v1/oauth/token \
+      -H 'Content-Type: application/x-www-form-urlencoded' -d @- |
+    jq -re .access_token) || return 1
+  mkdir -p "$(dirname "$auth")" || return 1
+  current='{}'
+  if [ -s "$auth" ]; then
+    current=$(cat "$auth") || return 1
+  fi
+  current=$(jq -e --arg key "$access" '.openrouter = {type: "api_key", key: $key}' <<<"$current") || return 1
+  write "${OPENROUTER_ACCESS_TOKEN_FILE:?}" "$access" || return 1
+  write "$auth" "$current"
+}
+
+# refresh <provider>...: every provider is attempted, and the call fails if any of them did.
 refresh() {
-  case "$1" in
-    anthropic | openai) "refresh_$1" ;;
-    *) echo "no federated credentials for provider '$1'" >&2; return 1 ;;
-  esac
+  local provider status=0
+  for provider in "$@"; do
+    case "$provider" in
+      anthropic | openai | openrouter) "refresh_$provider" || { echo "$(date -u +%FT%TZ) $provider credential refresh failed"; status=1; } ;;
+      *) echo "no federated credentials for provider '$provider'" >&2; status=1 ;;
+    esac
+  done
+  return "$status"
 }
 
 stop_loop() {
@@ -97,9 +130,12 @@ stop() {
   if [ -n "${ANTHROPIC_IDENTITY_TOKEN_FILE:-}" ]; then
     rm -f "$ANTHROPIC_IDENTITY_TOKEN_FILE" "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp"
   fi
+  if [ -n "${OPENROUTER_ACCESS_TOKEN_FILE:-}" ]; then
+    rm -f "$OPENROUTER_ACCESS_TOKEN_FILE" "$OPENROUTER_ACCESS_TOKEN_FILE.tmp"
+  fi
   rm -f "$auth.tmp"
   if [ -s "$auth" ]; then
-    if updated=$(jq -e 'del(.openai)' "$auth"); then
+    if updated=$(jq -e 'del(.openai, .openrouter)' "$auth"); then
       write "$auth" "$updated"
     else
       echo "$auth is not valid JSON; left it as is" >&2
@@ -113,13 +149,15 @@ stop() {
   return "$status"
 }
 
-usage="usage: llm_credentials.sh start|refresh <anthropic|openai> | stop"
+usage="usage: llm_credentials.sh start|refresh <anthropic|openai|openrouter>... | stop"
 case "${1:-}" in
   start)
     # A second start replaces the first loop rather than orphaning it.
     stop_loop
-    refresh "${2:?$usage}"
-    setsid bash "${BASH_SOURCE[0]}" loop "$2" </dev/null >>"$log" 2>&1 &
+    shift
+    [ "$#" -gt 0 ] || { echo "$usage" >&2; exit 1; }
+    refresh "$@"
+    setsid bash "${BASH_SOURCE[0]}" loop "$@" </dev/null >>"$log" 2>&1 &
     for _ in $(seq 50); do
       [ -s "$pidfile" ] && exit 0
       sleep 0.1
@@ -127,12 +165,17 @@ case "${1:-}" in
     echo "credential refresh loop did not start" >&2
     exit 1
     ;;
-  refresh) refresh "${2:?$usage}" ;;
+  refresh)
+    shift
+    [ "$#" -gt 0 ] || { echo "$usage" >&2; exit 1; }
+    refresh "$@"
+    ;;
   stop) stop ;;
   loop)
     echo "$$" > "$pidfile"
+    shift
     while sleep "${LLM_CREDENTIALS_INTERVAL:-30}"; do
-      refresh "$2" || echo "$(date -u +%FT%TZ) $2 credential refresh failed"
+      refresh "$@" || true
     done
     ;;
   *) echo "$usage" >&2; exit 1 ;;

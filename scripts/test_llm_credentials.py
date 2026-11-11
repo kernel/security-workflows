@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import urllib.parse
 
 import yaml
 
@@ -28,6 +29,10 @@ if os.environ.get("FAKE_CURL_FAIL"):
 if url.startswith("https://auth.openai.com/"):
     default = json.dumps({"access_token": "access-for-" + json.loads(body)["subject_token"]})
     print(os.environ.get("FAKE_OPENAI_RESPONSE", default))
+elif url.startswith("https://openrouter.ai/"):
+    form = urllib.parse.parse_qs(body)
+    default = json.dumps({"access_token": "or-access-for-" + form["subject_token"][0]})
+    print(os.environ.get("FAKE_OPENROUTER_RESPONSE", default))
 else:
     counter = Path(os.environ["FAKE_CURL_LOG"] + ".n")
     n = int(counter.read_text()) + 1 if counter.exists() else 1
@@ -57,6 +62,8 @@ class LlmCredentialsTest(unittest.TestCase):
             "OPENAI_IDENTITY_PROVIDER_ID": "idp_test",
             "OPENAI_SERVICE_ACCOUNT_ID": "user-test",
             "OPENAI_WIF_AUDIENCE": "https://api.openai.com/v1",
+            "OPENROUTER_FEDERATION_POLICY_ID": "fp_test",
+            "OPENROUTER_ACCESS_TOKEN_FILE": str(self.root / "openrouter-token"),
             "PI_CODING_AGENT_DIR": str(self.root / "pi"),
         }
 
@@ -102,12 +109,51 @@ class LlmCredentialsTest(unittest.TestCase):
         self.assertEqual(auth["anthropic"], {"type": "api_key", "key": "other"})
         self.assertEqual(auth["openai"]["key"], "access-for-jwt1-for-https://api.openai.com/v1")
 
+    def test_openrouter_exchanges_the_github_token(self):
+        self.assertEqual(self.run_script("refresh", "openrouter").returncode, 0)
+        oidc, exchange = self.requests()
+        self.assertTrue(oidc["url"].endswith("&audience=https%3A%2F%2Fopenrouter.ai"))
+        self.assertEqual(exchange["url"], "https://openrouter.ai/api/v1/oauth/token")
+        self.assertEqual(exchange["headers"], ["Content-Type: application/x-www-form-urlencoded"])
+        self.assertEqual(urllib.parse.parse_qs(exchange["body"]), {
+            "grant_type": ["urn:ietf:params:oauth:grant-type:token-exchange"],
+            "subject_token_type": ["urn:ietf:params:oauth:token-type:jwt"],
+            "federation_policy_id": ["fp_test"],
+            "subject_token": ["jwt1-for-https://openrouter.ai"],
+        })
+        token_file = self.root / "openrouter-token"
+        self.assertEqual(token_file.read_text(), "or-access-for-jwt1-for-https://openrouter.ai")
+        self.assertEqual(token_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.auth.read_text()),
+                         {"openrouter": {"type": "api_key", "key": "or-access-for-jwt1-for-https://openrouter.ai"}})
+
+    def test_refresh_handles_several_providers(self):
+        self.assertEqual(self.run_script("refresh", "openai", "openrouter").returncode, 0)
+        self.assertEqual(set(json.loads(self.auth.read_text())), {"openai", "openrouter"})
+        # One failing provider fails the call without skipping the others.
+        result = self.run_script("refresh", "openrouter", "openai", FAKE_OPENROUTER_RESPONSE="{}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("openrouter credential refresh failed", result.stdout)
+        self.assertEqual(json.loads(self.auth.read_text())["openai"]["key"],
+                         "access-for-jwt4-for-https://api.openai.com/v1")
+
+    def test_stop_removes_openrouter_credentials(self):
+        self.run_script("refresh", "openai", "openrouter")
+        self.assertEqual(self.run_script("stop").returncode, 0)
+        self.assertFalse((self.root / "openrouter-token").exists())
+        self.assertEqual(json.loads(self.auth.read_text()), {})
+
     def test_failed_refresh_keeps_working_credentials(self):
         self.run_script("refresh", "openai")
         self.run_script("refresh", "anthropic")
         before = {p: p.read_text() for p in (self.auth, self.token_file)}
-        for provider in ("openai", "anthropic"):
+        self.run_script("refresh", "openrouter")
+        before[self.root / "openrouter-token"] = (self.root / "openrouter-token").read_text()
+        before[self.auth] = self.auth.read_text()
+        for provider in ("openai", "anthropic", "openrouter"):
             self.assertNotEqual(self.run_script("refresh", provider, FAKE_CURL_FAIL="1").returncode, 0)
+        for response in ("{}", '{"error": "invalid_grant"}'):
+            self.assertNotEqual(self.run_script("refresh", "openrouter", FAKE_OPENROUTER_RESPONSE=response).returncode, 0)
         # The GitHub token is issued but OpenAI's response has no access token.
         for response in ("{}", '{"error": "invalid_grant"}'):
             self.assertNotEqual(self.run_script("refresh", "openai", FAKE_OPENAI_RESPONSE=response).returncode, 0)
@@ -186,16 +232,28 @@ class LlmCredentialsTest(unittest.TestCase):
         return result, read("calls"), read("github-env")
 
     def test_action_starts_the_model_provider(self):
-        _, calls, github_env = self.run_action("anthropic/claude-x")
+        _, calls, github_env = self.run_action("anthropic/claude-x", OPENROUTER_FEDERATION_POLICY_ID="")
         self.assertEqual(calls, "start anthropic\n")
         # Later steps run pi, whose Anthropic SDK needs the federation settings.
         self.assertEqual(github_env.splitlines(), [
             f"{name}=id-{name}" for name in ("ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
                                              "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE")])
 
-        _, calls, github_env = self.run_action("openai/gpt-x")
+        _, calls, github_env = self.run_action("openai/gpt-x", OPENROUTER_FEDERATION_POLICY_ID="")
         self.assertEqual(calls, "start openai\n")
         self.assertEqual(github_env, "")
+
+    def test_action_adds_openrouter_when_its_policy_is_set(self):
+        _, calls, github_env = self.run_action("openai/gpt-x")
+        self.assertEqual(calls, "start openai openrouter\n")
+        self.assertEqual(github_env, "OPENROUTER_ACCESS_TOKEN_FILE=id-OPENROUTER_ACCESS_TOKEN_FILE\n")
+
+        _, calls, _ = self.run_action("openai/gpt-x", OPENROUTER_FEDERATION_POLICY_ID="")
+        self.assertEqual(calls, "start openai\n")
+
+        _, calls, github_env = self.run_action("openrouter/deepseek-x")
+        self.assertEqual(calls, "start openrouter\n")
+        self.assertIn("OPENROUTER_ACCESS_TOKEN_FILE=", github_env)
 
     def test_action_stops(self):
         result, calls, _ = self.run_action("", STOP="true")
@@ -210,7 +268,8 @@ class LlmCredentialsTest(unittest.TestCase):
 
     def test_action_requires_the_providers_ids(self):
         for model, name, hint in (("anthropic/claude-x", "ANTHROPIC_FEDERATION_RULE_ID", "anthropic-federation-rule-id"),
-                                  ("openai/gpt-x", "OPENAI_WIF_AUDIENCE", "openai-audience")):
+                                  ("openai/gpt-x", "OPENAI_WIF_AUDIENCE", "openai-audience"),
+                                  ("openrouter/x", "OPENROUTER_FEDERATION_POLICY_ID", "openrouter-federation-policy-id")):
             result, calls, _ = self.run_action(model, **{name: ""})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(hint, result.stderr)

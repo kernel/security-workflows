@@ -1,15 +1,15 @@
 name: LLM credentials
 description: >-
-  Short-lived Anthropic or OpenAI credentials for pi through workload identity federation, so
-  the job needs no stored API key. The job needs `permissions: id-token: write`. Credentials are
+  Short-lived Anthropic, OpenAI or OpenRouter credentials for pi through workload identity
+  federation, so the job needs no stored API key. The job needs `permissions: id-token: write`. Credentials are
   refreshed in the background, so later steps run pi with no key in their env. Run the action
   again with `stop: true` once the model is done, to delete the credentials before later steps.
 
 inputs:
   model:
     description: >-
-      Pi model as provider/id, such as the PI_PREFERRED_MODEL variable. Its provider, anthropic or
-      openai, picks the credentials. Required unless stop is true.
+      Pi model as provider/id, such as the PI_PREFERRED_MODEL variable. Its provider, anthropic,
+      openai or openrouter, picks the credentials. Required unless stop is true.
   stop:
     description: Stop refreshing, delete the credentials and print the refresh log.
     default: 'false'
@@ -28,6 +28,11 @@ inputs:
     description: OpenAI service account ID
   openai-audience:
     description: Audience the OpenAI workload identity provider requires
+  openrouter-federation-policy-id:
+    description: >-
+      OpenRouter federation policy ID. Also set it when the model is not on OpenRouter but later
+      steps call OpenRouter themselves: they get a token in pi's auth.json and in the file named
+      by OPENROUTER_ACCESS_TOKEN_FILE.
 
 runs:
   using: composite
@@ -44,6 +49,8 @@ runs:
         OPENAI_IDENTITY_PROVIDER_ID: ${{ inputs.openai-identity-provider-id }}
         OPENAI_SERVICE_ACCOUNT_ID: ${{ inputs.openai-service-account-id }}
         OPENAI_WIF_AUDIENCE: ${{ inputs.openai-audience }}
+        OPENROUTER_FEDERATION_POLICY_ID: ${{ inputs.openrouter-federation-policy-id }}
+        OPENROUTER_ACCESS_TOKEN_FILE: ${{ runner.temp }}/openrouter-access-token
       run: |
         set -euo pipefail
         if [ "$STOP" = true ]; then
@@ -69,8 +76,18 @@ runs:
             require OPENAI_SERVICE_ACCOUNT_ID openai-service-account-id OPENAI_SERVICE_ACCOUNT_ID
             require OPENAI_WIF_AUDIENCE openai-audience OPENAI_WIF_AUDIENCE
             ;;
+          openrouter)
+            require OPENROUTER_FEDERATION_POLICY_ID openrouter-federation-policy-id OPENROUTER_FEDERATION_POLICY_ID
+            ;;
         esac
-        bash "$GITHUB_ACTION_PATH/llm_credentials.sh" start "$provider"
+        providers=("$provider")
+        if [ "$provider" != openrouter ] && [ -n "$OPENROUTER_FEDERATION_POLICY_ID" ]; then
+          providers+=(openrouter)
+        fi
+        bash "$GITHUB_ACTION_PATH/llm_credentials.sh" start "${providers[@]}"
+        if [[ " ${providers[*]} " == *" openrouter "* ]]; then
+          echo "OPENROUTER_ACCESS_TOKEN_FILE=$OPENROUTER_ACCESS_TOKEN_FILE" >> "$GITHUB_ENV"
+        fi
         # The Anthropic SDK in pi does the exchange itself, so later steps need the federation
         # settings. OpenAI's token is already in pi's auth.json.
         if [ "$provider" = anthropic ]; then
