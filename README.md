@@ -109,7 +109,7 @@ short-lived provider credentials, which is why the caller grants `id-token: writ
 
 ### `llm-credentials` action
 
-Gives pi short-lived Anthropic or OpenAI credentials through workload identity federation, so a
+Gives pi short-lived Anthropic, OpenAI or OpenRouter credentials through workload identity federation, so a
 job needs no stored API key. It refreshes them every 30 seconds in the background, so long agent
 runs keep working past the five-minute life of a GitHub OIDC token. Run it again with `stop: true`
 once the model is done: that stops the refresh, deletes the credentials, and prints the refresh
@@ -143,6 +143,11 @@ An action can't read `vars` itself, so the caller passes them; only the model's 
 used.
 Don't also set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the pi step: a key takes precedence over
 federation. For OpenAI the action sets only the `openai` entry of pi's `auth.json`.
+
+A job whose own scripts call OpenRouter, with a pi model elsewhere, also passes
+`openrouter-federation-policy-id: ${{ vars.OPENROUTER_FEDERATION_POLICY_ID }}`. Later steps then
+get `OPENROUTER_ACCESS_TOKEN_FILE`, which holds an OpenRouter access token (15 minutes at most)
+that the background loop keeps fresh. Read it before each request rather than once at startup.
 
 ## Enrollment
 
