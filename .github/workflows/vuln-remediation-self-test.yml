@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
 
       - name: Run unit and fixture tests
         run: python3 -m unittest scripts.test_vuln_remediation
