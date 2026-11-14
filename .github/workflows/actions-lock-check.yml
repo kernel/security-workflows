@@ -24,12 +24,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify actions.lock
+      # --verify-local makes no API calls. Online --verify reads every action's repository
+      # with this token, and orgs with an IP allow list (aquasecurity) reject runner IPs.
+      # The runner itself rejects a locked commit that isn't reachable from its tag.
+      - name: Verify actions.lock coverage
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh extension install github/gh-actions-lock --pin v0.4.1
-          gh actions-lock --verify
+          gh actions-lock --verify-local
 
       - name: Check action refs
         env:

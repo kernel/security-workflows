@@ -113,7 +113,7 @@ Fails a pull request when a workflow can run an action that wasn't reviewed. Eve
 step-level `uses:` must be an exact release tag (`actions/checkout@v4.4.0`), or a full
 commit SHA when the commit has no release tag, and `.github/workflows/actions.lock` must pin
 it. Same-repository actions use `$/.github/actions/<name>`. The job also runs
-`gh actions-lock --verify`. Reusable workflow calls (`jobs.<id>.uses`) aren't covered by the
+`gh actions-lock --verify-local`. Reusable workflow calls (`jobs.<id>.uses`) aren't covered by the
 lockfile and aren't checked.
 
 To fix a failure, run `gh actions-lock`, then check that no SHA pin of an untagged commit
