@@ -314,6 +314,14 @@ class MutableActionTagRuleTest(unittest.TestCase):
         ):
             self.assertFalse(self.flagged(uses), uses)
 
+    def test_inputs_reach_the_shell_through_env(self):
+        steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["scan"]["steps"]
+        step = next(s for s in steps if s.get("name") == "Run Semgrep")
+        self.assertNotIn("${{", self.script)
+        self.assertEqual(step["env"]["EXTRA_CONFIGS"], "${{ inputs.extra-configs }}")
+        self.assertIn("$EXTRA_CONFIGS \\\n", self.script)
+        self.assertIn('--baseline-commit "$BASELINE_COMMIT"', self.script)
+
     def test_flags_floating_tags_and_branches(self):
         for uses in ("actions/checkout@v4", "actions/checkout@v4.4", "actions/checkout@main", "actions/setup-node@v4.4.0-beta.1"):
             self.assertTrue(self.flagged(uses), uses)

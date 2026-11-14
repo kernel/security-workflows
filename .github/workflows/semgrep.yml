@@ -36,6 +36,9 @@ jobs:
           fetch-depth: 0
 
       - name: Run Semgrep
+        env:
+          EXTRA_CONFIGS: ${{ inputs.extra-configs }}
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
         run: |
           # Replaces the registry's github-actions-mutable-action-tag rule, which only accepts
           # commit SHAs. Workflows lock action commits in actions.lock, so an exact vX.Y.Z tag
@@ -72,6 +75,9 @@ jobs:
                       - pattern-not-regex: '@[0-9a-f]{40}(\s|$)'
                       - pattern-not-regex: '@v[0-9]+\.[0-9]+\.[0-9]+(\s|$)'
           RULE
+          # EXTRA_CONFIGS is a space-separated list of flags, so it is split on purpose.
+          set -f
+          # shellcheck disable=SC2086
           semgrep scan \
             --config p/security-audit \
             --config p/owasp-top-ten \
@@ -79,9 +85,9 @@ jobs:
             --config p/github-actions \
             --config "$RUNNER_TEMP/github-actions-mutable-action-tag.yml" \
             --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
-            ${{ inputs.extra-configs }} \
+            $EXTRA_CONFIGS \
             --severity ERROR --severity WARNING \
-            --baseline-commit ${{ github.event.pull_request.base.sha }} \
+            --baseline-commit "$BASELINE_COMMIT" \
             --json \
             -o semgrep-results.json || true
 
