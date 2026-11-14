@@ -61,7 +61,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2.1.7
 
       - name: Scan container image (table)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec
         with:
           image-ref: ${{ inputs.image-ref }}
           severity: ${{ inputs.severity }}
@@ -70,7 +70,7 @@ jobs:
           format: 'table'
 
       - name: Scan container image (json)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec
         with:
           image-ref: ${{ inputs.image-ref }}
           severity: ${{ inputs.severity }}

@@ -9,6 +9,8 @@ on:
       - 'scripts/vuln_remediation.py'
       - 'scripts/test_vuln_remediation.py'
       - 'scripts/test_vuln_remediation_workflow.py'
+      - 'scripts/action_pins.py'
+      - '.github/workflows/actions.lock'
   push:
     branches:
       - main
@@ -19,6 +21,8 @@ on:
       - 'scripts/vuln_remediation.py'
       - 'scripts/test_vuln_remediation.py'
       - 'scripts/test_vuln_remediation_workflow.py'
+      - 'scripts/action_pins.py'
+      - '.github/workflows/actions.lock'
   workflow_dispatch:
     inputs:
       run-live-remediation:

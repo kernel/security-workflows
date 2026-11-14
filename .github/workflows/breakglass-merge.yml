@@ -43,10 +43,10 @@ jobs:
     steps:
       - name: Generate app token
         id: app-token
-        # Pinned to a commit: this step is handed the app's private key, so a mutable tag
-        # would let whoever controls it run their own code with that key. d72941d is v1.12.0,
-        # the commit `v1` already resolved to, so pinning changed no behaviour.
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        # Locked to a commit in actions.lock: this step is handed the app's private key, so a
+        # moved tag must not change what runs. v1.12.0 is d72941d, the commit this step was
+        # pinned to before the lockfile.
+        uses: actions/create-github-app-token@v1.12.0
         with:
           app-id: ${{ secrets.BREAKGLASS_APP_ID }}
           private-key: ${{ secrets.BREAKGLASS_APP_PRIVATE_KEY }}
