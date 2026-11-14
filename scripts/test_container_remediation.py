@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from action_pins import lock_problem
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/container-remediation.yml"
@@ -48,7 +50,8 @@ class ContainerRemediationTests(unittest.TestCase):
                 if "uses" not in step:
                     continue
                 # The credentials action is this repo's own, checked out at security-workflows-ref.
-                self.assertRegex(step["uses"], r"^([\w.-]+/[\w.-]+@[0-9a-f]{40}|\./\.security-workflows/\.github/actions/llm-credentials)$")
+                if step["uses"] != "./.security-workflows/.github/actions/llm-credentials":
+                    self.assertIsNone(lock_problem(WORKFLOW, step["uses"]))
                 if step["uses"].startswith("actions/checkout@"):
                     self.assertIs(step["with"]["persist-credentials"], False)
                     self.assertNotIn("token", step["with"])

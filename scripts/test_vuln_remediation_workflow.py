@@ -8,8 +8,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
+
+import action_pins
+from action_pins import lock_problem
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github/workflows/vuln-remediation.yml"
@@ -73,10 +77,40 @@ class WorkflowCredentialBoundary(unittest.TestCase):
                 if not uses:
                     continue
                 if uses != CREDENTIALS_ACTION:
-                    self.assertRegex(uses, r"^[\w/-]+@[0-9a-f]{40}$", f"{job_name}: {uses}")
+                    self.assertIsNone(lock_problem(WORKFLOW_PATH, uses), job_name)
                 if job_name in ("fix", "agent", "verify", "pr") and uses.startswith("actions/checkout@"):
                     self.assertIs(entry["with"]["persist-credentials"], False)
                     self.assertNotIn("token", entry["with"])
+
+    def test_lock_check_rejects_floating_unlocked_and_tagged_sha_refs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lockfile = Path(tmp) / "actions.lock"
+            lockfile.write_text(yaml.safe_dump({
+                "workflows": {".github/workflows/vuln-remediation.yml": [
+                    "actions/checkout@v4.4.0",
+                    "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+                    "aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec",
+                ]},
+                "dependencies": {
+                    "actions/checkout@v4.4.0": {"ref": "v4.4.0"},
+                    "actions/checkout@11d5960a326750d5838078e36cf38b85af677262": {"ref": "v4.4.0"},
+                    "aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec": {"ref": "master"},
+                },
+            }))
+            with mock.patch.object(action_pins, "LOCKFILE", lockfile):
+                for uses in (
+                    "actions/checkout@v4.4.0",
+                    "aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec",
+                    "$/.github/actions/llm-credentials",
+                ):
+                    self.assertIsNone(lock_problem(WORKFLOW_PATH, uses), uses)
+                for uses in (
+                    "actions/checkout@v4",
+                    "actions/checkout@main",
+                    "actions/checkout@v4.5.0",
+                    "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+                ):
+                    self.assertIsNotNone(lock_problem(WORKFLOW_PATH, uses), uses)
 
     def test_default_token_is_read_only(self):
         self.assertEqual(yaml.safe_load(WORKFLOW_PATH.read_text())["permissions"], {"contents": "read"})

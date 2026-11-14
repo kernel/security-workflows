@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
@@ -283,6 +284,39 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(jobs["triage"]["permissions"], {"contents": "read", "pull-requests": "write", "id-token": "write"})
         for name in ("scan", "too-many-findings"):
             self.assertNotIn("id-token", jobs[name]["permissions"])
+
+
+class MutableActionTagRuleTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["scan"]["steps"]
+        cls.script = next(s for s in steps if s.get("name") == "Run Semgrep")["run"]
+        rule_text = cls.script.split("<<'RULE'\n", 1)[1].split("\nRULE\n", 1)[0]
+        (rule,) = yaml.safe_load(rule_text)["rules"]
+        cls.allowed = [p["pattern-not-regex"] for p in rule["patterns"][2]["metavariable-pattern"]["patterns"]]
+
+    def flagged(self, uses):
+        return not any(re.search(regex, uses) for regex in self.allowed)
+
+    def test_replaces_the_registry_rule(self):
+        self.assertIn("--config p/github-actions", self.script)
+        self.assertIn("--exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag", self.script)
+        self.assertIn('--config "$RUNNER_TEMP/github-actions-mutable-action-tag.yml"', self.script)
+
+    def test_allows_exact_tags_shas_and_same_repo_actions(self):
+        for uses in (
+            "actions/checkout@v4.4.0",
+            "kernel/security-workflows/.github/actions/llm-credentials@v1.2.3",
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "$/.github/actions/build",
+            "./.github/actions/build",
+            "docker://alpine:3",
+        ):
+            self.assertFalse(self.flagged(uses), uses)
+
+    def test_flags_floating_tags_and_branches(self):
+        for uses in ("actions/checkout@v4", "actions/checkout@v4.4", "actions/checkout@main", "actions/setup-node@v4.4.0-beta.1"):
+            self.assertTrue(self.flagged(uses), uses)
 
 
 if __name__ == "__main__":

@@ -52,23 +52,23 @@ jobs:
       has-findings: ${{ steps.check.outputs.has_findings }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@v4.3.1
         with:
           persist-credentials: false
 
       - name: Configure AWS credentials
         if: inputs.ecr-role-to-assume != ''
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        uses: aws-actions/configure-aws-credentials@v4.3.1
         with:
           role-to-assume: ${{ inputs.ecr-role-to-assume }}
           aws-region: ${{ inputs.aws-region }}
 
       - name: Log in to ECR
         if: inputs.ecr-role-to-assume != ''
-        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        uses: aws-actions/amazon-ecr-login@v2.1.7
 
       - name: Scan container image
-        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec # master
+        uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec
         with:
           image-ref: ${{ inputs.image-ref }}
           severity: 'CRITICAL,HIGH'
@@ -90,7 +90,7 @@ jobs:
           fi
 
       - name: Upload scan results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: container-scan-report
           path: trivy-results.json
@@ -105,17 +105,17 @@ jobs:
       id-token: write
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@v4.3.1
         with:
           persist-credentials: false
 
       - name: Download scan results
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4.3.0
         with:
           name: container-scan-report
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
 
@@ -131,7 +131,7 @@ jobs:
       # git so the agent's changes never include it and `git clean` keeps it for the stop step.
       - name: Fetch credentials action
         id: credentials-action
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v4.2.2
         with:
           repository: kernel/security-workflows
           ref: ${{ inputs.security-workflows-ref }}
@@ -174,7 +174,7 @@ jobs:
           stop: true
 
       - name: Upload triage results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: container-triage-result
           path: triage-result.json
@@ -199,13 +199,13 @@ jobs:
     steps:
       # The fix job builds on this same main commit.
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@v4.3.1
         with:
           ref: main
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@v5.6.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
           # Private module sources must not land in the repository's Actions cache.
@@ -224,7 +224,7 @@ jobs:
       - name: Generate Go module read token
         id: module-token
         if: steps.go-private.outputs.repos != ''
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        uses: actions/create-github-app-token@v1.12.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
@@ -247,7 +247,7 @@ jobs:
 
       - name: Upload private Go modules
         if: steps.go-private.outputs.repos != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: container-remediation-go-modules
           path: ${{ steps.download.outputs.dir }}
@@ -274,19 +274,19 @@ jobs:
       GOPRIVATE: github.com/kernel/*
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download scan results
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4.3.0
         with:
           name: container-scan-report
           path: ${{ runner.temp }}/container-scan
 
       - name: Download triage results
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4.3.0
         with:
           name: container-triage-result
           path: ${{ runner.temp }}/container-scan
@@ -313,7 +313,7 @@ jobs:
 
       - name: Setup Go
         if: inputs.go-version-file != ''
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@v5.6.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
           # The agent can write to the module cache, so this job must not save it.
@@ -321,7 +321,7 @@ jobs:
 
       - name: Download private Go modules
         if: needs.go-modules.outputs.private-modules == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4.3.0
         with:
           name: container-remediation-go-modules
           path: ${{ runner.temp }}/go-modules
@@ -334,7 +334,7 @@ jobs:
           cp -R "$RUNNER_TEMP/go-modules/." "$dir/"
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
 
@@ -350,7 +350,7 @@ jobs:
       # git so the agent's changes never include it and `git clean` keeps it for the stop step.
       - name: Fetch credentials action
         id: credentials-action
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v4.2.2
         with:
           repository: kernel/security-workflows
           ref: ${{ inputs.security-workflows-ref }}
@@ -430,7 +430,7 @@ jobs:
 
       - name: Upload validated changes
         if: steps.snapshot.outputs.changed == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: container-remediation-patch
           path: ${{ runner.temp }}/changes.patch
@@ -451,13 +451,13 @@ jobs:
       UPDATE_SHA: ${{ needs.fix.outputs.update_sha }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download validated changes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@v4.3.0
         with:
           name: container-remediation-patch
           path: ${{ runner.temp }}/container-remediation
@@ -498,7 +498,7 @@ jobs:
 
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        uses: actions/create-github-app-token@v1.12.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}

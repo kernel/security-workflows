@@ -31,17 +31,54 @@ jobs:
     outputs:
       findings_count: ${{ steps.count.outputs.findings_count }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 0
 
       - name: Run Semgrep
         run: |
+          # Replaces the registry's github-actions-mutable-action-tag rule, which only accepts
+          # commit SHAs. Workflows lock action commits in actions.lock, so an exact vX.Y.Z tag
+          # and a same-repo $/ action are fixed refs too. Floating tags and branches still match.
+          cat > "$RUNNER_TEMP/github-actions-mutable-action-tag.yml" <<'RULE'
+          rules:
+            - id: github-actions-mutable-action-tag
+              message: >-
+                GitHub Actions step uses a floating tag or branch reference. Tags and branch
+                names can be silently repointed by the action owner, enabling supply-chain
+                attacks. Reference an exact release tag (e.g. `actions/checkout@v4.4.0`) and
+                lock it with `gh actions-lock`, or a full 40-character commit SHA if the
+                commit has no release tag.
+              severity: WARNING
+              languages: [yaml]
+              metadata:
+                category: security
+                cwe:
+                  - "CWE-1357: Reliance on Insufficiently Trustworthy Component"
+                  - "CWE-353: Missing Support for Integrity Check"
+                references:
+                  - https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles
+              patterns:
+                - pattern-inside: "{steps: ...}"
+                - pattern: |
+                    uses: "$ACTION"
+                - metavariable-pattern:
+                    metavariable: $ACTION
+                    language: generic
+                    patterns:
+                      - pattern-not-regex: '^\./'
+                      - pattern-not-regex: '^\$/'
+                      - pattern-not-regex: '^docker://'
+                      - pattern-not-regex: '@[0-9a-f]{40}(\s|$)'
+                      - pattern-not-regex: '@v[0-9]+\.[0-9]+\.[0-9]+(\s|$)'
+          RULE
           semgrep scan \
             --config p/security-audit \
             --config p/owasp-top-ten \
             --config p/secrets \
             --config p/github-actions \
+            --config "$RUNNER_TEMP/github-actions-mutable-action-tag.yml" \
+            --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
             ${{ inputs.extra-configs }} \
             --severity ERROR --severity WARNING \
             --baseline-commit ${{ github.event.pull_request.base.sha }} \
@@ -63,7 +100,7 @@ jobs:
 
       - name: Upload results
         if: steps.count.outputs.findings_count != '0'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: semgrep-results
           path: semgrep-results.json
@@ -111,13 +148,13 @@ jobs:
       # Semgrep scanned the merge commit, but review comments go on the PR head. Depth 2 fetches
       # both, so the findings can be moved onto the head before the agent reads it.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 2
           persist-credentials: false
 
       - name: Download results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: semgrep-results
 
@@ -137,7 +174,7 @@ jobs:
           git checkout -q --detach "$HEAD_SHA"
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '22'
 
