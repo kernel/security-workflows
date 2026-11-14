@@ -186,7 +186,7 @@ jobs:
           pi --version
 
       - name: Model credentials
-        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        uses: kernel/security-workflows/.github/actions/llm-credentials@af490855f90e83f89dcaf4ea18da962ec294350e
         with:
           model: ${{ vars.PI_PREFERRED_MODEL }}
           anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -217,7 +217,7 @@ jobs:
 
       - name: Stop model credentials
         if: ${{ always() }}
-        uses: kernel/security-workflows/.github/actions/llm-credentials@main
+        uses: kernel/security-workflows/.github/actions/llm-credentials@af490855f90e83f89dcaf4ea18da962ec294350e
         with:
           stop: true
 

@@ -107,6 +107,32 @@ short-lived provider credentials, which is why the caller grants `id-token: writ
 
 ## Actions
 
+### `actions-lock-check.yml`
+
+Fails a pull request when a workflow can run an action that wasn't reviewed. Every
+step-level `uses:` must be an exact release tag (`actions/checkout@v4.4.0`), or a full
+commit SHA when the commit has no release tag, and `.github/workflows/actions.lock` must pin
+it. Same-repository actions use `$/.github/actions/<name>`. The job also runs
+`gh actions-lock --verify`. Reusable workflow calls (`jobs.<id>.uses`) aren't covered by the
+lockfile and aren't checked.
+
+To fix a failure, run `gh actions-lock`, then check that no SHA pin of an untagged commit
+was rewritten to a branch such as `@main`.
+
+```yaml
+# In your repo's .github/workflows/actions-lock-check.yml
+name: Actions lock check
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    uses: kernel/security-workflows/.github/workflows/actions-lock-check.yml@main
+    # with:
+    #   allow-sha-pins: true  # only for workflows a code generator owns
+```
+
 ### `llm-credentials` action
 
 Gives pi short-lived Anthropic, OpenAI or OpenRouter credentials through workload identity federation, so a
@@ -120,7 +146,7 @@ permissions:
   contents: read
   id-token: write
 steps:
-  - uses: kernel/security-workflows/.github/actions/llm-credentials@main
+  - uses: kernel/security-workflows/.github/actions/llm-credentials@<commit-sha>  # no release tags; lock it in actions.lock
     with:
       model: ${{ vars.PI_PREFERRED_MODEL }}
       anthropic-federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -133,7 +159,7 @@ steps:
       PI_PREFERRED_MODEL: ${{ vars.PI_PREFERRED_MODEL }}
     run: pi --print --model "$PI_PREFERRED_MODEL" ...  # no ANTHROPIC_API_KEY or OPENAI_API_KEY
   - if: always()
-    uses: kernel/security-workflows/.github/actions/llm-credentials@main
+    uses: kernel/security-workflows/.github/actions/llm-credentials@<commit-sha>
     with:
       stop: true
 ```

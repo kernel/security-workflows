@@ -3,6 +3,10 @@
 # Docs: https://gh.io/actions-lockfile
 version: 'v0.0.3'
 workflows:
+    '.github/workflows/actions-lock-check-self-test.yml':
+        - 'actions/checkout@v4.4.0'
+    '.github/workflows/actions-lock-check.yml':
+        - 'actions/checkout@v4.4.0'
     '.github/workflows/breakglass-merge.yml':
         - 'actions/create-github-app-token@v1.12.0'
     '.github/workflows/breakglass-tests.yml':
@@ -41,7 +45,7 @@ workflows:
         - 'actions/download-artifact@v4.3.0'
         - 'actions/setup-node@v4.4.0'
         - 'actions/upload-artifact@v4.6.2'
-        - 'kernel/security-workflows@main'
+        - 'kernel/security-workflows@af490855f90e83f89dcaf4ea18da962ec294350e'
     '.github/workflows/vuln-remediation-self-test.yml':
         - 'actions/checkout@v4.4.0'
     '.github/workflows/vuln-remediation.yml':
@@ -141,7 +145,7 @@ dependencies:
         commit: 'sha1-7474bc4690e29a8392af63c5b98e7449536d5c3a'
         owner_id: 57468012
         repo_id: 220391287
-    'kernel/security-workflows@main':
+    'kernel/security-workflows@af490855f90e83f89dcaf4ea18da962ec294350e':
         ref: 'main'
         commit: 'sha1-af490855f90e83f89dcaf4ea18da962ec294350e'
         owner_id: 194616459
