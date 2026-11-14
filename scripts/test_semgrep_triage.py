@@ -277,7 +277,7 @@ class WorkflowTest(unittest.TestCase):
         agent = self.names.index("Triage findings")
         self.assertEqual(self.names[agent - 1], "Model credentials")
         self.assertEqual(self.names[agent + 1], "Stop model credentials")
-        action = "kernel/security-workflows/.github/actions/llm-credentials@main"
+        action = "kernel/security-workflows/.github/actions/llm-credentials@af490855f90e83f89dcaf4ea18da962ec294350e"
         self.assertEqual(self.step("Model credentials")["uses"], action)
         self.assertEqual(self.step("Stop model credentials")["with"], {"stop": True})
         jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]

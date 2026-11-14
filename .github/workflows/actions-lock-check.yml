@@ -1,0 +1,51 @@
+name: Actions lock check
+
+# Checks the caller's workflows against the org convention: every step-level action is
+# an exact vX.Y.Z release (or a full SHA for a commit with no release tag), and
+# actions.lock pins it. The job holds no secrets because it runs a third-party binary.
+
+on:
+  workflow_call:
+    inputs:
+      allow-sha-pins:
+        description: Accept SHA pins of tagged releases, for workflows a generator owns
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+
+      # --verify-local makes no API calls. Online --verify reads every action's repository
+      # with this token, and orgs with an IP allow list (aquasecurity) reject runner IPs.
+      # The runner itself rejects a locked commit that isn't reachable from its tag.
+      - name: Verify actions.lock coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-actions-lock --pin v0.4.1
+          gh actions-lock --verify-local
+
+      - name: Check action refs
+        env:
+          ALLOW_SHA_PINS: ${{ inputs.allow-sha-pins }}
+        run: |
+          if [ "$GITHUB_REPOSITORY" = kernel/security-workflows ]; then
+            cp scripts/action_pins.py "$RUNNER_TEMP/action_pins.py"  # self-test runs the PR's copy
+          else
+            curl -fsSL https://raw.githubusercontent.com/kernel/security-workflows/main/scripts/action_pins.py \
+              -o "$RUNNER_TEMP/action_pins.py"
+          fi
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q PyYAML==6.0.3
+          flags=()
+          if [ "$ALLOW_SHA_PINS" = true ]; then flags+=(--allow-sha-pins); fi
+          "$RUNNER_TEMP/venv/bin/python" -I "$RUNNER_TEMP/action_pins.py" "${flags[@]}" .

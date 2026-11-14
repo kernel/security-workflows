@@ -1,0 +1,24 @@
+name: Actions Lock Check Self-Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -m venv /tmp/action-pins-tests
+          /tmp/action-pins-tests/bin/pip install PyYAML==6.0.3
+          /tmp/action-pins-tests/bin/python -m unittest discover -s scripts -p test_action_pins.py
+
+  check:
+    uses: ./.github/workflows/actions-lock-check.yml
