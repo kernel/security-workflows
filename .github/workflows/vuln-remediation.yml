@@ -53,6 +53,8 @@ jobs:
         uses: actions/checkout@v4.4.0
         with:
           token: ${{ steps.app-token.outputs.token }}
+          # The Socket CLI installed and run below never needs git credentials.
+          persist-credentials: false
 
       - name: Install Socket CLI
         run: npm install -g @socketsecurity/cli
