@@ -47,6 +47,7 @@ jobs:
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          permission-contents: read
 
       - name: Checkout repository
         uses: actions/checkout@v4.4.0
