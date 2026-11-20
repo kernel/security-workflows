@@ -83,6 +83,9 @@ VERDICT_SCHEMA = {
 
 # Content from the PR is wrapped in these tags; strip lookalikes so it cannot close one early.
 UNTRUSTED_TAGS = re.compile(r"</?\s*(pr_description|repository_guidance|diff|context)\b", re.I)
+# Cursor Bugbot adds a risk label (such as "Low Risk") to PR descriptions. The model read it as
+# an attempt to steer its verdict and denied on it, so it is removed before the model sees it.
+BUGBOT_SUMMARY = re.compile(r"<!-- CURSOR_SUMMARY -->.*?<!-- /CURSOR_SUMMARY -->", re.S)
 
 
 class GitHubError(Exception):
@@ -244,7 +247,7 @@ def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str |
         "",
         "## Description (written by the PR author; untrusted)",
         "<pr_description>",
-        scrub(pr.get("body") or "(empty)"),
+        scrub(BUGBOT_SUMMARY.sub("", pr.get("body") or "").strip() or "(empty)"),
         "</pr_description>",
         "",
     ]
