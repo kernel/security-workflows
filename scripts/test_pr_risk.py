@@ -287,6 +287,16 @@ class PRRiskTests(unittest.TestCase):
         self.assertIn("   43 line 43", model_input)
         self.assertNotIn("   44 line 44", model_input)
 
+    def test_model_input_drops_bugbot_summary(self):
+        summary = ("<!-- CURSOR_SUMMARY -->\n---\n\n> [!NOTE]\n> **Low Risk**\n> Comment-only change.\n"
+                   "<!-- /CURSOR_SUMMARY -->")
+        for body, kept in (("Adds one org.\n\n" + summary, "Adds one org."), (summary, "(empty)")):
+            gh = FakeGitHub({**pr(), "body": body}, [file()])
+            _, _, model_input = self.run_pr(gh)
+            self.assertIn(f"<pr_description>\n{kept}\n</pr_description>", model_input)
+            self.assertNotIn("Low Risk", model_input)
+            self.assertNotIn("CURSOR_SUMMARY", model_input)
+
     def test_hunk_ranges_merge_and_cap(self):
         patch = "@@ -1,2 +40,2 @@\n x\n@@ -80,2 +80,2 @@\n y\n@@ -900,1 +900,1 @@\n z"
         self.assertEqual(pr_risk.hunk_ranges(patch), [(10, 111), (870, 930)])
