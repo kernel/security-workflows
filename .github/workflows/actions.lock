@@ -37,6 +37,11 @@ workflows:
         - 'actions/checkout@v4.2.2'
         - 'actions/create-github-app-token@v3.3.0'
         - 'actions/setup-node@v4.4.0'
+    '.github/workflows/sandboxed-agent-tests.yml':
+        - 'actions/checkout@v4.2.2'
+    '.github/workflows/sandboxed-agent.yml':
+        - 'actions/checkout@v4.4.0'
+        - 'actions/create-github-app-token@v3.3.0'
     '.github/workflows/semgrep-self-test.yml': []
     '.github/workflows/semgrep-tests.yml':
         - 'actions/checkout@v4.2.2'

@@ -105,6 +105,52 @@ input. It must be an `anthropic/` or `openai/` model. There is no API key to pas
 [`llm-credentials`](#llm-credentials-action) action exchanges the job's GitHub OIDC token for
 short-lived provider credentials, which is why the caller grants `id-token: write`.
 
+### `sandboxed-agent.yml`
+
+Runs Pi with `--approve` against the caller's repository inside a
+[Docker Sandbox](https://docs.docker.com/ai/sandboxes/): a microVM with its own kernel, filesystem
+and Docker daemon, on the GitHub-hosted runner. The agent has sudo and Docker inside the sandbox,
+and no credentials. The sandbox proxy adds them to outbound requests:
+
+- **GitHub:** kernel-internal installation tokens, limited to the caller's repository and
+  `app-permissions`. They are minted on the runner from a key file the sandbox can't reach.
+- **The model:** OpenAI or OpenRouter credentials from workload identity federation.
+
+The agent pushes branches and opens pull requests through the proxy, and reads check runs
+through a read-only relay. With `merge: true` it ends by writing `ready:<pr>`, and the workflow
+merges only after Cursor Bugbot and every other check pass on that pull request's head commit.
+
+```yaml
+jobs:
+  update:
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
+      id-token: write
+    uses: kernel/security-workflows/.github/workflows/sandboxed-agent.yml@main
+    with:
+      prompt-file: .github/workflows/my-agent-prompt.md   # ${OUTCOME_FILE} is substituted
+      app-permissions: '{"contents":"write","pull_requests":"write"}'
+      merge: true
+      evergreen-branch: automation/my-agent
+      setup: |                                             # optional, runs in the sandbox
+        curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh
+    secrets:
+      ADMIN_APP_ID: ${{ secrets.ADMIN_APP_ID }}
+      ADMIN_APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+      DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}   # sbx needs a signed-in Docker account
+      DOCKER_PAT: ${{ secrets.DOCKERHUB_TOKEN }}
+      AGENT_SECRETS: |                                     # optional NAME=value lines
+        CURSOR_API_KEY=${{ secrets.CURSOR_API_KEY }}
+```
+
+The prompt tells the agent to write `no-updates`, `ready:<pr>` (with `merge: true`) or
+`merged:<pr>` to `${OUTCOME_FILE}`. Anthropic models aren't supported yet: their federation
+hands the agent an identity token to exchange itself, which the proxy can't do for it.
+
 ## Actions
 
 ### `actions-lock-check.yml`
