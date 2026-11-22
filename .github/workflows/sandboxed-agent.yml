@@ -190,6 +190,7 @@ jobs:
           APP_PERMISSIONS: ${{ inputs.app-permissions }}
           RELAY_TOKEN: ${{ github.token }}
         run: |
+          # shellcheck disable=SC2016 # the inline Node.js script is single-quoted on purpose
           umask 077
           scripts="$GITHUB_WORKSPACE/.sandboxed-agent/.github/workflows/sandboxed-agent"
           printf '%s' "$APP_PRIVATE_KEY" > "$STATE/app-key.pem"
@@ -269,6 +270,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           THINKING: ${{ inputs.thinking }}
         run: |
+          # shellcheck disable=SC2016 # envsubst and the sandbox shell expand these, not this one
           while IFS='=' read -r name value; do
             [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$name=$value"
           done <<<"$AGENT_ENV"
@@ -281,6 +283,7 @@ jobs:
       - name: Read the outcome
         id: read-outcome
         run: |
+          # shellcheck disable=SC2016 # expanded by the sandbox shell
           outcome=$(sbx exec "$SANDBOX" bash -c 'cat "$1" 2>/dev/null' bash "$OUTCOME_FILE" | tr -d '\r\n' || true)
           if ! [[ "$outcome" =~ ^(no-updates|ready:[0-9]+|merged:[0-9]+)$ ]]; then
             echo "::error::The agent exited without writing no-updates, ready:<pr> or merged:<pr> to $OUTCOME_FILE" >&2
