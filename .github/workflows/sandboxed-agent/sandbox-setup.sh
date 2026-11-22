@@ -12,10 +12,10 @@ export PI_TELEMETRY=0
 tmp=$(mktemp -d)
 base=https://nodejs.org/dist/latest-v22.x
 curl -fsSL "$base/SHASUMS256.txt" -o "$tmp/SHASUMS256.txt"
-tarball=$(awk '/linux-x64\.tar\.xz$/ { print $2 }' "$tmp/SHASUMS256.txt")
+tarball=$(awk '/linux-x64\.tar\.gz$/ { print $2 }' "$tmp/SHASUMS256.txt")
 curl -fsSL "$base/$tarball" -o "$tmp/$tarball"
 (cd "$tmp" && grep " $tarball\$" SHASUMS256.txt | sha256sum -c --quiet)
-sudo tar -xJf "$tmp/$tarball" -C /usr/local --strip-components=1
+sudo tar -xzf "$tmp/$tarball" -C /usr/local --strip-components=1
 rm -rf "$tmp"
 node --version
 
