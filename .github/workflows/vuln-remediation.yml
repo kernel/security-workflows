@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@v1.12.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
@@ -245,7 +245,7 @@ jobs:
       - name: Generate private module read token
         id: read-token
         if: steps.check.outputs.skip != 'true'
-        uses: actions/create-github-app-token@v1.12.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
@@ -702,7 +702,7 @@ jobs:
 
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@v1.12.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
