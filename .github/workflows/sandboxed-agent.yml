@@ -190,10 +190,10 @@ jobs:
           APP_PERMISSIONS: ${{ inputs.app-permissions }}
           RELAY_TOKEN: ${{ github.token }}
         run: |
-          # shellcheck disable=SC2016 # the inline Node.js script is single-quoted on purpose
           umask 077
           scripts="$GITHUB_WORKSPACE/.sandboxed-agent/.github/workflows/sandboxed-agent"
           printf '%s' "$APP_PRIVATE_KEY" > "$STATE/app-key.pem"
+          # shellcheck disable=SC2016 # the inline Node.js script is single-quoted on purpose
           installation_id=$(node -e '
             const { createSign } = require("node:crypto");
             const now = Math.floor(Date.now() / 1000);
@@ -270,13 +270,14 @@ jobs:
           MODEL: ${{ inputs.model }}
           THINKING: ${{ inputs.thinking }}
         run: |
-          # shellcheck disable=SC2016 # envsubst and the sandbox shell expand these, not this one
           while IFS='=' read -r name value; do
             [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$name=$value"
           done <<<"$AGENT_ENV"
+          # shellcheck disable=SC2016 # envsubst expands these, not this shell
           vars='${GITHUB_REPOSITORY} ${OUTCOME_FILE}'
           for name in $PROMPT_VARS; do vars="$vars \${$name}"; done
           envsubst "$vars" < "$PROMPT_FILE" | sbx exec -i "$SANDBOX" bash -c 'cat > /home/agent/prompt.md'
+          # shellcheck disable=SC2016 # the sandbox shell expands these
           sbx exec --env-file "$STATE/agent.env" -e MODEL="$MODEL" -e THINKING="$THINKING" "$SANDBOX" \
             bash -c 'pi --print --no-session --approve --model "$MODEL" --thinking "$THINKING" @/home/agent/prompt.md'
 
