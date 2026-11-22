@@ -166,9 +166,14 @@ jobs:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
         run: |
+          if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PAT" ]; then
+            echo "::error::DOCKER_USERNAME and DOCKER_PAT are empty. sbx needs a signed-in Docker account; pass a read-scoped personal access token this repository can read." >&2
+            exit 1
+          fi
           deb="$STATE/sbx.deb"
           curl -fsSL "https://github.com/docker/sbx-releases/releases/download/v$SBX_VERSION/DockerSandboxes-linux-amd64-ubuntu2404.deb" -o "$deb"
           echo "$SBX_DEB_SHA256  $deb" | sha256sum -c --quiet
+          sudo apt-get update -qq
           sudo apt-get install -y -qq "$deb" >/dev/null
           # The runner user may use KVM; nothing else changes on the host.
           sudo setfacl -m "u:$USER:rw" /dev/kvm
