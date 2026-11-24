@@ -160,11 +160,6 @@ class PRRiskTests(unittest.TestCase):
 
     def test_ineligible_reasons(self):
         patterns = pr_risk.deny_patterns("identity/**\n# comment\n")
-        # GitHub reports binaries and pure renames with no patch and zero changed lines.
-        binary = file("bin/helper", additions=0, changes=0)
-        del binary["patch"]
-        renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
-        del renamed["patch"]
         cases = {
             "draft": (pr(draft=True), [file()], "write"),
             "fork": (pr(fork=True), [file()], "write"),
@@ -173,8 +168,6 @@ class PRRiskTests(unittest.TestCase):
             "51 changed lines": (pr(additions=30, deletions=21), [file()], "write"),
             "deny list (`identity/**`)": (pr(), [file("identity/access.go")], "write"),
             "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")], "write"),
-            "`bin/helper` has no reviewable text diff": (pr(additions=0), [binary], "write"),
-            "`b.yaml` has no reviewable text diff": (pr(additions=0), [renamed], "write"),
         }
         for expected, (p, files, permission) in cases.items():
             with self.subTest(expected=expected):
@@ -182,6 +175,11 @@ class PRRiskTests(unittest.TestCase):
         # pr() reports CONTRIBUTOR, as the API does for every private member; it must not matter.
         self.assertIsNone(pr_risk.ineligible_reason(pr(additions=25, deletions=25), [file()], patterns, "write"))
         self.assertIsNone(pr_risk.ineligible_reason(pr(), [file()], patterns, "admin"))
+        # A missing patch no longer rejects a PR here: gather synthesizes a diff for text files
+        # and only then decides, so binaries and pure renames are handled there.
+        patchless = file("data/table.txt")
+        del patchless["patch"]
+        self.assertIsNone(pr_risk.ineligible_reason(pr(), [patchless], patterns, "write"))
 
     def test_bot_author_is_silent(self):
         gh = FakeGitHub(pr(), [file()], permission="none")
@@ -197,6 +195,64 @@ class PRRiskTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIsNone(model_input)
         self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_patchless_data_file_is_classified(self):
+        # GitHub renders no patch for a file with megabyte-long lines, such as the canvas
+        # replay tables; the diff is synthesized from both contents, lines clipped.
+        table = file("canvas-replay-table.txt", additions=1)
+        del table["patch"]
+        kept = "encoded aaa data:image/png;base64," + "A" * 80000
+        added = "encoded bbb data:image/png;base64," + "B" * 80000
+        gh = FakeGitHub(
+            pr(additions=1),
+            [table],
+            contents={
+                ("canvas-replay-table.txt", "base000"): kept,
+                ("canvas-replay-table.txt", "abc1234def"): kept + "\n" + added,
+            },
+        )
+        gate, code, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(gh.created), 1)
+        self.assertIn("diff synthesized from the file contents at both ends", model_input)
+        self.assertIn("+encoded bbb data:image/png;base64," + "B" * 156, model_input)
+        self.assertIn("[80,035 chars]", model_input)
+        # The model never sees the megabytes: input stays small with the context included.
+        self.assertLess(len(model_input), 20000)
+
+    def test_patchless_binary_stays_ineligible_and_silent(self):
+        # GitHub reports binaries with no patch; file_at returns None for undecodable content.
+        binary = file("bin/helper", additions=0, changes=0)
+        del binary["patch"]
+        gh = FakeGitHub(pr(additions=0), [binary])
+        gate, code, model_input = self.run_pr(gh)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason"], "`bin/helper` has no reviewable text diff")
+        self.assertEqual(code, 0)
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_pure_rename_without_patch_stays_ineligible(self):
+        renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
+        del renamed["patch"]
+        same = "x: 1\n"
+        gh = FakeGitHub(pr(additions=0), [renamed],
+                        contents={("a.yaml", "base000"): same, ("b.yaml", "abc1234def"): same})
+        gate, code, model_input = self.run_pr(gh)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason"], "`b.yaml` has no reviewable text diff")
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_long_patch_lines_are_clipped(self):
+        long_line = "+  - " + "z" * 900
+        gh = FakeGitHub(pr(additions=1), [file(patch="@@ -1,1 +1,2 @@\n   - a\n" + long_line)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+  - " + "z" * 195, model_input)
+        self.assertIn("[905 chars]", model_input)
+        self.assertNotIn("z" * 900, model_input)
 
     def test_eligible_creates_comment_with_verdict(self):
         gh = FakeGitHub(pr(), [file()])

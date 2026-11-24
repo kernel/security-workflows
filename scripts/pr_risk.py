@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import re
@@ -30,6 +31,9 @@ MAX_CONTEXT_LINES_PER_FILE = 400
 MAX_GUIDANCE_CHARS = 6000
 MAX_REASON_WORDS = 45
 MAX_HISTORY = 20
+# One line of diff or context longer than this is cut, keeping the shape of the change
+# readable without feeding the model megabytes of base64 — a canvas replay table line is ~76KB.
+MAX_LINE_CHARS = 200
 
 MARKER = "<!-- pr-risk-classifier -->"
 DATA_RE = re.compile(r"<!-- pr-risk:v1 (\{.*?\}) -->", re.S)
@@ -129,6 +133,9 @@ class GitHub:
         try:
             return self.api("-H", "Accept: application/vnd.github.raw",
                             f"/repos/{self.repo}/contents/{urllib.parse.quote(path)}?ref={ref}")
+        except UnicodeDecodeError:
+            # Binary content does not decode as text; there is no diff to read.
+            return None
         except GitHubError as err:
             if "HTTP 403" in str(err) or "HTTP 404" in str(err):
                 return None
@@ -190,9 +197,6 @@ def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns:
             for pattern, regex in compiled:
                 if regex.match(path):
                     return f"`{path}` is on the deny list (`{pattern}`)"
-    for f in files:
-        if "patch" not in f:
-            return f"`{f['filename']}` has no reviewable text diff"
     return None
 
 
@@ -225,7 +229,7 @@ def context_snippets(content: str, patch: str) -> list[tuple[int, int, str]]:
         hi = min(hi, len(lines), lo + budget - 1)
         if hi < lo:
             break
-        body = "\n".join(f"{n:>5} {lines[n - 1]}" for n in range(lo, hi + 1))
+        body = "\n".join(f"{n:>5} {clip_line(lines[n - 1])}" for n in range(lo, hi + 1))
         snippets.append((lo, hi, body))
         budget -= hi - lo + 1
     return snippets
@@ -235,8 +239,38 @@ def scrub(text: str) -> str:
     return UNTRUSTED_TAGS.sub("[tag removed]", text or "")
 
 
+def clip_line(line: str) -> str:
+    """One diff or context line, with very long lines cut to what the model can usefully read."""
+    if len(line) <= MAX_LINE_CHARS:
+        return line
+    return f"{line[:MAX_LINE_CHARS]}… [{len(line):,} chars]"
+
+
+def clip_lines(text: str) -> str:
+    return "\n".join(clip_line(line) for line in text.splitlines())
+
+
+def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head_sha: str) -> str | None:
+    """A unified diff for a file GitHub renders no patch for.
+
+    GitHub omits the patch when the diff is too large to show, which is normal for files with
+    very long lines, such as data tables — not only binaries, the old assumption. Text at both
+    ends diffs fine here; binary or unfetchable content (None from file_at), and a pure rename
+    with no content change (no hunks), return None so the PR stays ineligible as before.
+    """
+    old_path = f.get("previous_filename") or f["filename"]
+    base = "" if f["status"] == "added" else gh.file_at(old_path, base_sha)
+    head = "" if f["status"] == "removed" else gh.file_at(f["filename"], head_sha)
+    if base is None or head is None:
+        return None
+    patch = "\n".join(difflib.unified_diff(
+        base.splitlines(), head.splitlines(),
+        fromfile=f"a/{old_path}", tofile=f"b/{f['filename']}", lineterm=""))
+    return patch if "@@" in patch else None
+
+
 def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str | None,
-                contents: dict[str, str]) -> str:
+               contents: dict[str, str], synthesized: dict[str, str]) -> str:
     out = [
         "# Pull request",
         f"Repository: {pr['base']['repo']['full_name']}",
@@ -262,7 +296,13 @@ def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str |
     out += ["## Diff", "<diff>"]
     for f in files:
         name = f"{f.get('previous_filename')} -> {f['filename']}" if f.get("previous_filename") else f["filename"]
-        out += [f"### {name} ({f['status']}, +{f['additions']} -{f['deletions']})", scrub(f.get("patch", ""))]
+        patch = f.get("patch")
+        origin = ""
+        if patch is None:
+            patch = synthesized.get(f["filename"], "")
+            origin = " · diff synthesized from the file contents at both ends, as GitHub renders none"
+        out += [f"### {name} ({f['status']}, +{f['additions']} -{f['deletions']}{origin})",
+                clip_lines(scrub(patch))]
     out += ["</diff>", ""]
     snippets = []
     for f in files:
@@ -297,14 +337,7 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
     files = gh.files(number)
     existing = find_comment(gh.comments(number))
     reason = ineligible_reason(pr, files, deny_patterns(extra_deny), gh.permission(pr["user"]["login"]))
-    gate = {
-        "sha": pr["head"]["sha"],
-        "eligible": reason is None,
-        "reason": reason,
-        "changed_lines": pr["additions"] + pr["deletions"],
-        "comment_id": existing["id"] if existing else None,
-        "previous": previous_data(existing["body"]) if existing else None,
-    }
+    synthesized = {}
     if reason is None:
         # Guidance comes from the base branch so the PR under review cannot rewrite it.
         guidance = gh.file_at("AGENTS.md", pr["base"]["sha"])
@@ -314,7 +347,26 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
                 text = gh.file_at(f["filename"], pr["head"]["sha"])
                 if text is not None:
                     contents[f["filename"]] = text
-        (out / "input.md").write_text(build_input(pr, files, guidance, contents))
+        # A missing patch means binary or unfetchable content (ineligible, as before) or a diff
+        # too large for GitHub to render, which is diffed from the contents at both ends.
+        for f in files:
+            if "patch" not in f:
+                patch = synthesize_patch(gh, f, pr["base"]["sha"], pr["head"]["sha"])
+                if patch is None:
+                    reason = f"`{f['filename']}` has no reviewable text diff"
+                    synthesized = {}
+                    break
+                synthesized[f["filename"]] = patch
+        if reason is None:
+            (out / "input.md").write_text(build_input(pr, files, guidance, contents, synthesized))
+    gate = {
+        "sha": pr["head"]["sha"],
+        "eligible": reason is None,
+        "reason": reason,
+        "changed_lines": pr["additions"] + pr["deletions"],
+        "comment_id": existing["id"] if existing else None,
+        "previous": previous_data(existing["body"]) if existing else None,
+    }
     (out / "gate.json").write_text(json.dumps(gate, indent=2))
     write_output("eligible", "true" if reason is None else "false")
     write_output("commented", "true" if existing else "false")
