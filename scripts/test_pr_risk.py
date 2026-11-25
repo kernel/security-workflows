@@ -243,6 +243,53 @@ class PRRiskTests(unittest.TestCase):
         self.assertIn("[300 chars]", model_input)
         self.assertNotIn("z" * 200, model_input)
 
+    def test_clipped_pair_when_one_line_extends_the_other(self):
+        # An empty shared prefix with the shorter line inside the longer one's suffix: the
+        # middle of the shorter line stays empty instead of repeating the suffix.
+        tail = "b" * 250
+        patch = "@@ -1 +1 @@\n-" + tail + "\n+a" + tail + "\n"
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+…a…", model_input)
+        self.assertNotIn("b" * 200, model_input)
+
+    def test_deleted_content_starting_with_dashes_pairs_like_any_deletion(self):
+        # Only a synthesized patch's opening line is a --- header; a deleted line whose own
+        # content starts with dashes must not be mistaken for one.
+        shared = "z" * 300
+        patch = "@@ -1 +1 @@\n---" + shared + "ORIG\n+--" + shared + "EVIL\n"
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("ORIG", model_input)
+        self.assertIn("EVIL", model_input)
+        self.assertIn("[302 chars]", model_input)
+
+    def test_no_newline_marker_does_not_break_pairing(self):
+        shared = "z" * 300
+        patch = ("@@ -1 +1 @@\n-" + shared + "ORIG\n\\ No newline at end of file\n+"
+                 + shared + "EVIL\n")
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("ORIG", model_input)
+        self.assertIn("EVIL", model_input)
+        self.assertIn("\\ No newline at end of file", model_input)
+
+    def test_added_file_without_phantom_line_crosses_the_cap_exactly(self):
+        # A synthesized diff must not invent an extra changed line at the end of a file: a
+        # 50-line addition is exactly at the cap, not over it.
+        added = file("new.txt", status="added", additions=50)
+        del added["patch"]
+        head = "\n".join(f"row{i}" for i in range(50))
+        gh = FakeGitHub(pr(additions=50, deletions=0), [added],
+                        contents={("new.txt", "abc1234def"): head})
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+row49", model_input)
+        self.assertNotIn("+\n", model_input[200:])
+
     def test_synthesized_diff_is_from_the_merge_base(self):
         # The base branch tip can differ from the branch point; the synthesized diff must not
         # fold main's own changes into the diff inverted.

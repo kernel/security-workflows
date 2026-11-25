@@ -273,8 +273,8 @@ def clip_pair(old: str, new: str) -> tuple[str, str]:
     o, n = old[1:], new[1:]
     prefix = os.path.commonprefix([o, n])
     suffix = os.path.commonprefix([o[len(prefix):][::-1], n[len(prefix):][::-1]])[::-1]
-    om = o[len(prefix):len(o) - len(suffix) or None]
-    nm = n[len(prefix):len(n) - len(suffix) or None]
+    om = o[len(prefix):len(o) - len(suffix)]
+    nm = n[len(prefix):len(n) - len(suffix)]
     head, tail = clip_middle(prefix, PAIR_EDGE_CHARS), clip_middle(suffix, PAIR_EDGE_CHARS)
     return (f"-{head}…{clip_middle(om, MAX_LINE_CHARS)}…{tail}",
             f"+{head}…{clip_middle(nm, MAX_LINE_CHARS)}…{tail}")
@@ -283,34 +283,55 @@ def clip_pair(old: str, new: str) -> tuple[str, str]:
 def clip_diff(text: str) -> str:
     """A diff, clipped line by line, with the first difference of each -/+ pair kept visible."""
     lines = text.split("\n")
-    out: list[str] = []
-    i = 0
+    # A synthesized patch opens with difflib's file headers; a GitHub patch opens at the first
+    # @@. So a line starting --- is a header only in the opening position — anywhere else it
+    # is a deleted line whose own content starts with dashes and must not break the pairing.
+    start = 2 if text.startswith("--- ") else 0
+    out = lines[:start]
+    i = start
     while i < len(lines):
-        if not lines[i].startswith("-") or lines[i].startswith("---"):
+        if lines[i][:1] not in ("+", "-"):
             out.append(clip_line(lines[i]))
             i += 1
             continue
+        # A run of deletions and the additions that replace them. "\\ No newline at end of
+        # file" markers ride along inside a run, so a missing trailing newline does not stop
+        # the -/+ pairing.
         j = i
-        while j < len(lines) and lines[j].startswith("-") and not lines[j].startswith("---"):
+        while j < len(lines) and lines[j][:1] in ("-", "\\"):
             j += 1
         k = j
-        while k < len(lines) and lines[k].startswith("+") and not lines[k].startswith("+++"):
+        while k < len(lines) and lines[k][:1] in ("+", "\\"):
             k += 1
-        olds, news = lines[i:j], lines[j:k]
+        run = lines[i:k]
+        olds = [x for x in run if x[:1] == "-"]
+        news = [x for x in run if x[:1] == "+"]
         if news:
             for o, n in zip(olds, news):
                 out.extend(clip_pair(o, n))
             out.extend(clip_line(line) for line in olds[len(news):] + news[len(olds):])
         else:
             out.extend(clip_line(line) for line in olds)
+        out.extend(line for line in run if line[:1] == "\\")
         i = k
     return "\n".join(out)
 
 
 def count_changed_lines(patch: str) -> int:
     """The + and - lines of a diff, which is what the changed-lines cap counts."""
-    return sum(1 for line in patch.split("\n")
-               if line[:1] in "+-" and not line.startswith(("+++", "---")))
+    lines = patch.split("\n")
+    # Only the opening lines can be file headers; a deleted line whose content starts with
+    # dashes is content and counts.
+    start = 2 if patch.startswith("--- ") else 0
+    return sum(1 for line in lines[start:] if line[:1] in ("+", "-"))
+
+
+def file_lines(text: str) -> list[str]:
+    """A file's lines the way git sees them: no phantom line after a trailing newline."""
+    if not text:
+        return []
+    lines = text.split("\n")
+    return lines[:-1] if text.endswith("\n") else lines
 
 
 def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head: str | None) -> str | None:
@@ -329,7 +350,7 @@ def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head: str | N
     if base is None or head is None:
         return None
     patch = "\n".join(difflib.unified_diff(
-        base.split("\n"), head.split("\n"),
+        file_lines(base), file_lines(head),
         fromfile=f"a/{old_path}", tofile=f"b/{f['filename']}", lineterm=""))
     return patch if "@@" in patch else None
 
