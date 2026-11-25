@@ -34,6 +34,8 @@ MAX_HISTORY = 20
 # One line of diff or context longer than this is cut, keeping the shape of the change
 # readable without feeding the model megabytes of base64 — a canvas replay table line is ~76KB.
 MAX_LINE_CHARS = 200
+# The shared ends kept around the differing middle when a -/+ pair is clipped.
+PAIR_EDGE_CHARS = 80
 
 MARKER = "<!-- pr-risk-classifier -->"
 DATA_RE = re.compile(r"<!-- pr-risk:v1 (\{.*?\}) -->", re.S)
@@ -129,9 +131,14 @@ class GitHub:
         data = json.loads(self.api(f"/repos/{self.repo}/collaborators/{urllib.parse.quote(login)}/permission"))
         return data["permission"]
 
+    def merge_base(self, base: str, head: str) -> str:
+        """The commit a PR's diff is measured from, not the base branch tip."""
+        data = json.loads(self.api(f"/repos/{self.repo}/compare/{base}...{head}"))
+        return data["merge_base_commit"]["sha"]
+
     def file_at(self, path: str, ref: str) -> str | None:
         try:
-            return self.api("-H", "Accept: application/vnd.github.raw",
+            text = self.api("-H", "Accept: application/vnd.github.raw",
                             f"/repos/{self.repo}/contents/{urllib.parse.quote(path)}?ref={ref}")
         except UnicodeDecodeError:
             # Binary content does not decode as text; there is no diff to read.
@@ -140,6 +147,10 @@ class GitHub:
             if "HTTP 403" in str(err) or "HTTP 404" in str(err):
                 return None
             raise
+        if "\x00" in text:
+            # Git treats NUL bytes as binary (UTF-16 and friends); no text diff either.
+            return None
+        return text
 
     def create_comment(self, number: int, body: str) -> None:
         self.api("-X", "POST", f"/repos/{self.repo}/issues/{number}/comments", body={"body": body})
@@ -222,7 +233,7 @@ def hunk_ranges(patch: str) -> list[tuple[int, int]]:
 
 
 def context_snippets(content: str, patch: str) -> list[tuple[int, int, str]]:
-    lines = content.splitlines()
+    lines = content.split("\n")
     snippets = []
     budget = MAX_CONTEXT_LINES_PER_FILE
     for lo, hi in hunk_ranges(patch):
@@ -246,25 +257,79 @@ def clip_line(line: str) -> str:
     return f"{line[:MAX_LINE_CHARS]}… [{len(line):,} chars]"
 
 
-def clip_lines(text: str) -> str:
-    return "\n".join(clip_line(line) for line in text.splitlines())
+def clip_middle(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}… [{len(text):,} chars]"
 
 
-def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head_sha: str) -> str | None:
-    """A unified diff for a file GitHub renders no patch for.
+def clip_pair(old: str, new: str) -> tuple[str, str]:
+    """One -/+ pair of a diff, clipped so the first place the lines differ stays visible.
+
+    Clipping both lines at the same width can hide the change: two lines sharing a long
+    prefix clip to identical visible text and the change reads as a no-op. The shared prefix
+    and suffix are cut to PAIR_EDGE_CHARS instead, leaving the differing middle in view.
+    """
+    if len(old) <= MAX_LINE_CHARS and len(new) <= MAX_LINE_CHARS:
+        return old, new
+    o, n = old[1:], new[1:]
+    prefix = os.path.commonprefix([o, n])
+    suffix = os.path.commonprefix([o[len(prefix):][::-1], n[len(prefix):][::-1]])[::-1]
+    om = o[len(prefix):len(o) - len(suffix) or None]
+    nm = n[len(prefix):len(n) - len(suffix) or None]
+    head, tail = clip_middle(prefix, PAIR_EDGE_CHARS), clip_middle(suffix, PAIR_EDGE_CHARS)
+    return (f"-{head}…{clip_middle(om, MAX_LINE_CHARS)}…{tail}",
+            f"+{head}…{clip_middle(nm, MAX_LINE_CHARS)}…{tail}")
+
+
+def clip_diff(text: str) -> str:
+    """A diff, clipped line by line, with the first difference of each -/+ pair kept visible."""
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith("-") or lines[i].startswith("---"):
+            out.append(clip_line(lines[i]))
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and lines[j].startswith("-") and not lines[j].startswith("---"):
+            j += 1
+        k = j
+        while k < len(lines) and lines[k].startswith("+") and not lines[k].startswith("+++"):
+            k += 1
+        olds, news = lines[i:j], lines[j:k]
+        if news:
+            for o, n in zip(olds, news):
+                out.extend(clip_pair(o, n))
+            out.extend(clip_line(line) for line in olds[len(news):] + news[len(olds):])
+        else:
+            out.extend(clip_line(line) for line in olds)
+        i = k
+    return "\n".join(out)
+
+
+def count_changed_lines(patch: str) -> int:
+    """The + and - lines of a diff, which is what the changed-lines cap counts."""
+    return sum(1 for line in patch.split("\n")
+               if line[:1] in "+-" and not line.startswith(("+++", "---")))
+
+
+def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head: str | None) -> str | None:
+    """A unified diff for a file GitHub renders no patch for, from the merge base to the head.
 
     GitHub omits the patch when the diff is too large to show, which is normal for files with
-    very long lines, such as data tables — not only binaries, the old assumption. Text at both
-    ends diffs fine here; binary or unfetchable content (None from file_at), and a pure rename
-    with no content change (no hunks), return None so the PR stays ineligible as before.
+    very long lines, such as data tables — not only binaries, the old assumption. `head` is
+    the file's content at the PR head, already fetched for the context; `base_sha` is the
+    merge base, which is what GitHub measures the diff and the line counts from, so changes
+    made on the base branch after the branch point do not leak into the diff inverted.
+    Binary or unfetchable content (None from file_at), and no content change between the two
+    ends (no hunks), return None so the PR stays ineligible as before.
     """
     old_path = f.get("previous_filename") or f["filename"]
     base = "" if f["status"] == "added" else gh.file_at(old_path, base_sha)
-    head = "" if f["status"] == "removed" else gh.file_at(f["filename"], head_sha)
     if base is None or head is None:
         return None
     patch = "\n".join(difflib.unified_diff(
-        base.splitlines(), head.splitlines(),
+        base.split("\n"), head.split("\n"),
         fromfile=f"a/{old_path}", tofile=f"b/{f['filename']}", lineterm=""))
     return patch if "@@" in patch else None
 
@@ -302,12 +367,13 @@ def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str |
             patch = synthesized.get(f["filename"], "")
             origin = " · diff synthesized from the file contents at both ends, as GitHub renders none"
         out += [f"### {name} ({f['status']}, +{f['additions']} -{f['deletions']}{origin})",
-                clip_lines(scrub(patch))]
+                clip_diff(scrub(patch))]
     out += ["</diff>", ""]
     snippets = []
     for f in files:
         if f["filename"] in contents:
-            for lo, hi, body in context_snippets(contents[f["filename"]], f.get("patch", "")):
+            patch = f.get("patch") or synthesized.get(f["filename"], "")
+            for lo, hi, body in context_snippets(contents[f["filename"]], patch):
                 snippets += [f'<context path="{f["filename"]}" lines="{lo}-{hi}">', scrub(body), "</context>"]
     if snippets:
         out += ["## Surrounding code at the PR head (line-numbered)"] + snippets
@@ -348,17 +414,26 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
                 if text is not None:
                     contents[f["filename"]] = text
         # A missing patch means binary or unfetchable content (ineligible, as before) or a diff
-        # too large for GitHub to render, which is diffed from the contents at both ends.
+        # too large for GitHub to render, which is diffed from the merge base — the commit
+        # GitHub measures the diff and the line counts from, so base-branch changes made after
+        # the branch point do not leak into the synthesized diff inverted.
+        base_sha = gh.merge_base(pr["base"]["sha"], pr["head"]["sha"])
+        changed = pr["additions"] + pr["deletions"]
         for f in files:
             if "patch" not in f:
-                patch = synthesize_patch(gh, f, pr["base"]["sha"], pr["head"]["sha"])
+                head = "" if f["status"] == "removed" else contents.get(f["filename"])
+                patch = synthesize_patch(gh, f, base_sha, head)
                 if patch is None:
                     reason = f"`{f['filename']}` has no reviewable text diff"
-                    synthesized = {}
                     break
                 synthesized[f["filename"]] = patch
-        if reason is None:
-            (out / "input.md").write_text(build_input(pr, files, guidance, contents, synthesized))
+                # GitHub reports zero line counts for content it treats as binary, so the
+                # synthesized diff's own count is what the size cap sees for those files.
+                changed += count_changed_lines(patch) - (f["additions"] + f["deletions"])
+        if reason is None and changed > MAX_CHANGED_LINES:
+            reason = f"{changed} changed lines (limit {MAX_CHANGED_LINES})"
+    if reason is None:
+        (out / "input.md").write_text(build_input(pr, files, guidance, contents, synthesized))
     gate = {
         "sha": pr["head"]["sha"],
         "eligible": reason is None,
