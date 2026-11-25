@@ -1,0 +1,363 @@
+name: Sandboxed agent
+
+# Runs Pi with --approve against the caller's repository inside a Docker Sandbox: a microVM
+# with its own kernel, filesystem and Docker daemon, on the GitHub-hosted runner. The agent has
+# root inside the sandbox and no way out of it except the network, through sbx's proxy.
+#
+# Credentials never enter the sandbox. The sbx proxy adds them to matching requests on the way
+# out, and the agent only ever sees placeholders:
+# - GitHub: installation tokens of the kernel-internal app, limited to the caller's repository
+#   and `app-permissions`. The proxy fetches them by running mint-token.mjs on the runner, which
+#   reads the app key from a file the sandbox can't reach.
+# - The model provider: short-lived OpenAI or OpenRouter credentials from workload identity
+#   federation (the llm-credentials action), re-read on every request.
+#
+# The agent works on its own clone of the caller's checkout and pushes branches through the
+# proxy. It reads check runs through a read-only relay on the runner, because the app has no
+# checks permission. With `merge: true`, the agent stops at `ready:<pr>` and this workflow merges
+# the pull request only after Cursor Bugbot and every other check pass on its head commit.
+#
+# Outcome: the agent writes one line to $OUTCOME_FILE inside the sandbox:
+#   no-updates      nothing to change (with `evergreen-branch`, no pull request from it may be open)
+#   ready:<pr>      with `merge: true`, the pull request is ready for the merge gate
+#   merged:<pr>     with `merge: false`, the agent merged the pull request itself
+#
+# Callers grant `id-token: write` for the model credentials, plus read access to actions,
+# checks, contents, pull requests and statuses for the checkout, the relay and the merge gate.
+
+on:
+  workflow_call:
+    inputs:
+      prompt-file:
+        description: Path of the prompt in the caller's repository. `${OUTCOME_FILE}`, `${GITHUB_REPOSITORY}` and the variables named in `prompt-vars` are substituted.
+        type: string
+        required: true
+      prompt-vars:
+        description: Space-separated names from `env` to substitute in the prompt
+        type: string
+        required: false
+        default: ''
+      app-permissions:
+        description: JSON permissions for the agent's GitHub App token, such as {"contents":"write","pull_requests":"write"}. The token is limited to the caller's repository.
+        type: string
+        required: true
+      env:
+        description: Non-secret NAME=value lines set for the agent
+        type: string
+        required: false
+        default: ''
+      setup:
+        description: Bash run inside the sandbox, in the checkout, after Node.js and Pi are installed and before the agent starts
+        type: string
+        required: false
+        default: ''
+      merge:
+        description: Merge the agent's `ready:<pr>` pull request once Cursor Bugbot and every other check pass
+        type: boolean
+        required: false
+        default: false
+      evergreen-branch:
+        description: With a `no-updates` outcome, fail if a pull request from this branch is still open
+        type: string
+        required: false
+        default: ''
+      model:
+        description: Pi model as provider/id, on OpenAI or OpenRouter. Defaults to the PI_PREFERRED_MODEL variable.
+        type: string
+        required: false
+        default: ${{ vars.PI_PREFERRED_MODEL }}
+      thinking:
+        description: Pi thinking level
+        type: string
+        required: false
+        default: max
+      timeout-minutes:
+        description: Job timeout
+        type: number
+        required: false
+        default: 180
+      security-workflows-ref:
+        description: Ref of kernel/security-workflows to fetch this workflow's scripts from
+        type: string
+        required: false
+        default: main
+    secrets:
+      ADMIN_APP_ID:
+        required: true
+      ADMIN_APP_PRIVATE_KEY:
+        required: true
+      # A Docker account personal access token with read scope; sbx requires a signed-in user.
+      DOCKER_USERNAME:
+        required: true
+      DOCKER_PAT:
+        required: true
+      # Secret NAME=value lines set for the agent, such as API keys for its tools.
+      AGENT_SECRETS:
+        required: false
+    outputs:
+      outcome:
+        description: no-updates, or merged:<pr>
+        value: ${{ jobs.agent.outputs.outcome }}
+
+jobs:
+  agent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
+      id-token: write
+    outputs:
+      outcome: ${{ steps.outcome.outputs.outcome }}
+    env:
+      SBX_VERSION: 0.54.0
+      SBX_DEB_SHA256: 2ed91c566a2001a03c337058f056cf8ddcf700944482f1092e8cd70a5d84af7f
+      SANDBOX: agent
+      STATE: ${{ github.workspace }}/../sandboxed-agent
+      OUTCOME_FILE: /home/agent/outcome
+      CHECKS_RELAY_PORT: '8378'
+    steps:
+      - name: Check the model provider
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          case "${MODEL%%/*}" in
+            openai | openrouter) ;;
+            *) echo "::error::The sandboxed agent supports OpenAI and OpenRouter models, not '$MODEL'" >&2; exit 1 ;;
+          esac
+          mkdir -p "$STATE"
+          chmod 700 "$STATE"
+
+      - name: Checkout
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Checked out rather than referenced as kernel/security-workflows/...@<ref>, because `uses`
+      # can't take an expression and the scripts must follow security-workflows-ref. It lands in
+      # the workspace, which the sandbox can read; nothing secret is kept there. Keys and tokens
+      # stay in $STATE, outside it.
+      - name: Fetch sandboxed agent scripts
+        uses: actions/checkout@v4.4.0
+        with:
+          repository: kernel/security-workflows
+          ref: ${{ inputs.security-workflows-ref }}
+          path: .sandboxed-agent
+          sparse-checkout: |
+            .github/actions/llm-credentials
+            .github/workflows/sandboxed-agent
+          persist-credentials: false
+
+      - name: Model credentials
+        uses: ./.sandboxed-agent/.github/actions/llm-credentials
+        with:
+          model: ${{ inputs.model }}
+          openai-identity-provider-id: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          openai-service-account-id: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          openai-audience: ${{ vars.OPENAI_WIF_AUDIENCE }}
+          openrouter-federation-policy-id: ${{ vars.OPENROUTER_FEDERATION_POLICY_ID }}
+
+      - name: Install Docker Sandboxes
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
+        run: |
+          if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PAT" ]; then
+            echo "::error::DOCKER_USERNAME and DOCKER_PAT are empty. sbx needs a signed-in Docker account; pass a read-scoped personal access token this repository can read." >&2
+            exit 1
+          fi
+          deb="$STATE/sbx.deb"
+          curl -fsSL "https://github.com/docker/sbx-releases/releases/download/v$SBX_VERSION/DockerSandboxes-linux-amd64-ubuntu2404.deb" -o "$deb"
+          echo "$SBX_DEB_SHA256  $deb" | sha256sum -c --quiet
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "$deb" >/dev/null
+          # The runner user may use KVM; nothing else changes on the host.
+          sudo setfacl -m "u:$USER:rw" /dev/kvm
+          echo "$DOCKER_PAT" | sbx login --username "$DOCKER_USERNAME" --password-stdin
+          # The agent researches release notes on the web, so egress is open. Credentials still
+          # only reach the hosts sbx attaches them to.
+          sbx policy init allow-all
+          sbx policy allow network "localhost:$CHECKS_RELAY_PORT"
+
+      - name: Agent GitHub credentials
+        env:
+          APP_ID: ${{ secrets.ADMIN_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          APP_PERMISSIONS: ${{ inputs.app-permissions }}
+          RELAY_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          scripts="$GITHUB_WORKSPACE/.sandboxed-agent/.github/workflows/sandboxed-agent"
+          printf '%s' "$APP_PRIVATE_KEY" > "$STATE/app-key.pem"
+          # shellcheck disable=SC2016 # the inline Node.js script is single-quoted on purpose
+          installation_id=$(node -e '
+            const { createSign } = require("node:crypto");
+            const now = Math.floor(Date.now() / 1000);
+            const enc = (v) => Buffer.from(JSON.stringify(v)).toString("base64url");
+            const u = `${enc({ alg: "RS256", typ: "JWT" })}.${enc({ iat: now - 60, exp: now + 300, iss: process.env.APP_ID })}`;
+            const s = createSign("RSA-SHA256"); s.update(u);
+            const key = require("node:fs").readFileSync(process.argv[1], "utf8").replaceAll("\\n", "\n");
+            fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/installation`, {
+              headers: { Authorization: `Bearer ${u}.${s.sign(key, "base64url")}`, Accept: "application/vnd.github+json", "User-Agent": "sandboxed-agent" },
+            }).then((r) => r.json()).then((j) => { if (!j.id) throw new Error("no installation for this repository"); console.log(j.id); });
+          ' "$STATE/app-key.pem")
+          jq -n \
+            --arg appId "$APP_ID" --arg installationId "$installation_id" \
+            --arg repository "${GITHUB_REPOSITORY#*/}" --argjson permissions "$APP_PERMISSIONS" \
+            --arg keyFile "$STATE/app-key.pem" --arg tokensFile "$STATE/tokens" \
+            '{$appId, $installationId, $repository, $permissions, $keyFile, $tokensFile}' > "$STATE/mint.json"
+          # Installation tokens last an hour; the proxy fetches a new one every 30 minutes.
+          sbx secret set github --command "$(command -v node) $scripts/mint-token.mjs $STATE/mint.json" --refresh 30m
+
+          printf '%s' "$RELAY_TOKEN" | GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            setsid node "$scripts/checks-relay.mjs" >>"$STATE/checks-relay.log" 2>&1 &
+          echo "$!" > "$STATE/checks-relay.pid"
+
+      - name: Agent model credentials
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          if [ "${MODEL%%/*}" = openai ]; then
+            sbx secret set openai --command "$(command -v jq) -r .openai.key $HOME/.pi/agent/auth.json" --refresh on-demand
+          fi
+          if [ -n "${OPENROUTER_ACCESS_TOKEN_FILE:-}" ]; then
+            sbx secret set openrouter --command "cat $OPENROUTER_ACCESS_TOKEN_FILE" --refresh on-demand
+          fi
+
+      - name: Agent environment
+        env:
+          AGENT_ENV: ${{ inputs.env }}
+          AGENT_SECRETS: ${{ secrets.AGENT_SECRETS }}
+        run: |
+          umask 077
+          {
+            echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            echo "OUTCOME_FILE=$OUTCOME_FILE"
+            echo "CHECKS_RELAY_URL=http://host.docker.internal:$CHECKS_RELAY_PORT"
+            echo "CI=true"
+            echo "GIT_TERMINAL_PROMPT=0"
+            echo "PI_TELEMETRY=0"
+            echo "PI_SKIP_VERSION_CHECK=1"
+            # The proxy replaces these placeholders with the real model credentials.
+            echo "OPENAI_API_KEY=proxy-managed"
+            echo "OPENROUTER_API_KEY=proxy-managed"
+            echo "OPENROUTER_ACCESS_TOKEN_FILE=/home/agent/.openrouter-token"
+            printf '%s\n' "$AGENT_ENV" "$AGENT_SECRETS" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true
+          } > "$STATE/agent.env"
+
+      - name: Create the sandbox
+        run: |
+          sbx create --name "$SANDBOX" --clone --no-progress shell .
+          sbx exec --env-file "$STATE/agent.env" "$SANDBOX" bash -c 'printf proxy-managed > ~/.openrouter-token'
+          sbx exec -i --env-file "$STATE/agent.env" "$SANDBOX" bash -s \
+            < "$GITHUB_WORKSPACE/.sandboxed-agent/.github/workflows/sandboxed-agent/sandbox-setup.sh"
+
+      - name: Caller setup
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: printf '%s\n' "$SETUP" | sbx exec -i --env-file "$STATE/agent.env" "$SANDBOX" bash -euo pipefail -s
+
+      - name: Run the agent
+        env:
+          PROMPT_FILE: ${{ inputs.prompt-file }}
+          PROMPT_VARS: ${{ inputs.prompt-vars }}
+          AGENT_ENV: ${{ inputs.env }}
+          MODEL: ${{ inputs.model }}
+          THINKING: ${{ inputs.thinking }}
+        run: |
+          while IFS='=' read -r name value; do
+            [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$name=$value"
+          done <<<"$AGENT_ENV"
+          # shellcheck disable=SC2016 # envsubst expands these, not this shell
+          vars='${GITHUB_REPOSITORY} ${OUTCOME_FILE}'
+          for name in $PROMPT_VARS; do vars="$vars \${$name}"; done
+          envsubst "$vars" < "$PROMPT_FILE" | sbx exec -i "$SANDBOX" bash -c 'cat > /home/agent/prompt.md'
+          # shellcheck disable=SC2016 # the sandbox shell expands these
+          sbx exec --env-file "$STATE/agent.env" -e MODEL="$MODEL" -e THINKING="$THINKING" "$SANDBOX" \
+            bash -c 'pi --print --no-session --approve --model "$MODEL" --thinking "$THINKING" @/home/agent/prompt.md'
+
+      - name: Read the outcome
+        id: read-outcome
+        run: |
+          # shellcheck disable=SC2016 # expanded by the sandbox shell
+          outcome=$(sbx exec "$SANDBOX" bash -c 'cat "$1" 2>/dev/null' bash "$OUTCOME_FILE" | tr -d '\r\n' || true)
+          if ! [[ "$outcome" =~ ^(no-updates|ready:[0-9]+|merged:[0-9]+)$ ]]; then
+            echo "::error::The agent exited without writing no-updates, ready:<pr> or merged:<pr> to $OUTCOME_FILE" >&2
+            exit 1
+          fi
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+
+      - name: Merge token
+        id: merge-token
+        if: inputs.merge && startsWith(steps.read-outcome.outputs.outcome, 'ready:')
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          app-id: ${{ secrets.ADMIN_APP_ID }}
+          private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: ${{ fromJSON(inputs.app-permissions).workflows || '' }}
+
+      - name: Check and merge
+        id: outcome
+        env:
+          OUTCOME: ${{ steps.read-outcome.outputs.outcome }}
+          MERGE: ${{ inputs.merge }}
+          EVERGREEN_BRANCH: ${{ inputs.evergreen-branch }}
+          GH_TOKEN: ${{ github.token }}
+          MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
+        run: |
+          pr=${OUTCOME#*:}
+          case "$OUTCOME:$MERGE" in
+            no-updates:*)
+              if [ -n "$EVERGREEN_BRANCH" ]; then
+                open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$EVERGREEN_BRANCH" --state open --json number --jq '.[0].number // ""')
+                if [ -n "$open" ]; then
+                  echo "::error::The agent reported no updates while #$open from $EVERGREEN_BRANCH is open" >&2
+                  exit 1
+                fi
+              fi
+              ;;
+            ready:*:true)
+              bash "$GITHUB_WORKSPACE/.sandboxed-agent/.github/workflows/sandboxed-agent/merge-gate.sh" "$pr"
+              OUTCOME="merged:$pr"
+              ;;
+            merged:*:false)
+              state=$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json state --jq .state)
+              if [ "$state" != MERGED ]; then
+                echo "::error::The agent reported $OUTCOME, but #$pr is $state" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Outcome $OUTCOME doesn't match merge: $MERGE" >&2
+              exit 1
+              ;;
+          esac
+          echo "outcome=$OUTCOME" >> "$GITHUB_OUTPUT"
+
+      - name: Tear down
+        if: always()
+        run: |
+          sbx rm --force "$SANDBOX" >/dev/null 2>&1 || true
+          sbx secret rm github >/dev/null 2>&1 || true
+          if [ -f "$STATE/checks-relay.pid" ]; then
+            kill "$(cat "$STATE/checks-relay.pid")" 2>/dev/null || true
+          fi
+          if [ -f "$STATE/tokens" ]; then
+            while IFS= read -r token; do
+              curl -fsS -o /dev/null -X DELETE -H "Authorization: Bearer $token" https://api.github.com/installation/token || true
+            done < "$STATE/tokens"
+          fi
+          rm -f "$STATE/app-key.pem" "$STATE/tokens" "$STATE/agent.env"
+
+      - name: Stop model credentials
+        if: always()
+        uses: ./.sandboxed-agent/.github/actions/llm-credentials
+        with:
+          stop: true

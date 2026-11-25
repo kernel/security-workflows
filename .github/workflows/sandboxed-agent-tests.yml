@@ -1,0 +1,45 @@
+name: Sandboxed Agent Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sandboxed-agent.yml
+      - .github/workflows/sandboxed-agent-tests.yml
+      - .github/workflows/sandboxed-agent/**
+      - scripts/test_sandboxed_agent.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sandboxed-agent.yml
+      - .github/workflows/sandboxed-agent-tests.yml
+      - .github/workflows/sandboxed-agent/**
+      - scripts/test_sandboxed_agent.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: |
+          python3 -m venv /tmp/sandboxed-agent-tests
+          /tmp/sandboxed-agent-tests/bin/pip install PyYAML==6.0.3
+          /tmp/sandboxed-agent-tests/bin/python -m unittest discover -s scripts -p test_sandboxed_agent.py
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: shellcheck and actionlint
+        run: |
+          set -euo pipefail
+          tarball=actionlint_1.7.7_linux_amd64.tar.gz
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v1.7.7/$tarball"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          shellcheck .github/workflows/sandboxed-agent/*.sh
+          node --check .github/workflows/sandboxed-agent/mint-token.mjs
+          node --check .github/workflows/sandboxed-agent/checks-relay.mjs
+          ./actionlint .github/workflows/sandboxed-agent.yml .github/workflows/sandboxed-agent-tests.yml

@@ -152,7 +152,7 @@ jobs:
         id: app-token
         if: ${{ !cancelled() && (steps.gather.outputs.eligible == 'true' || steps.gather.outputs.commented == 'true') }}
         # Pinned to a commit because this step is handed the app's private key. d72941d is v1.12.0.
-        uses: actions/create-github-app-token@v1.12.0
+        uses: actions/create-github-app-token@v3.3.0
         with:
           app-id: ${{ secrets.ADMIN_APP_ID }}
           private-key: ${{ secrets.ADMIN_APP_PRIVATE_KEY }}
