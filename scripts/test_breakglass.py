@@ -81,7 +81,7 @@ def pr(number, head, base, stacked=True):
     return {
         "number": number, "state": "open", "draft": False,
         "stack": {"number": 42, "position": number, "base": {"ref": "main"}} if stacked else None,
-        "author_association": "MEMBER",
+        "author_association": "MEMBER", "user": {"login": "author"},
         "head": {"ref": head, "sha": f"sha-{number}", "repo": {"full_name": "kernel/example"}},
         "base": {"ref": base, "repo": {"full_name": "kernel/example"}},
     }
@@ -149,7 +149,7 @@ class BreakglassTests(unittest.TestCase):
         self.assertEqual(state["requests"][0]["merge_method"], "squash")
 
     def test_rejects_unauthorized_requests_without_merge_submission(self):
-        for case in ("requester", "fork", "author", "short_reason", "audit_failure"):
+        for case in ("requester", "fork", "author", "self_author", "short_reason", "audit_failure"):
             with self.subTest(case=case):
                 changes = {}
                 prs = {"1": pr(1, "first", "main")}
@@ -159,6 +159,8 @@ class BreakglassTests(unittest.TestCase):
                     prs["1"]["head"]["repo"]["full_name"] = "external/example"
                 elif case == "author":
                     prs["1"]["author_association"] = "CONTRIBUTOR"
+                elif case == "self_author":
+                    prs["1"]["user"]["login"] = "operator"
                 elif case == "short_reason":
                     changes["body"] = "/breakglass short"
                 elif case == "audit_failure":
@@ -168,6 +170,9 @@ class BreakglassTests(unittest.TestCase):
                 self.assertNotIn("requests", state)
                 if case == "requester":
                     self.assertNotIn("comments", state)
+                if case == "self_author":
+                    self.assertIn("second person", state["comments"][-1]["body"])
+                    self.assertNotIn("merged", state)
 
     def test_refuses_moved_head_base_or_new_downstack_pr(self):
         for change in ("change_head", "change_base", "change_stack"):
