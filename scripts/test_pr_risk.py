@@ -66,13 +66,16 @@ def file(name="posthog/flags/prod.yaml", patch=PATCH, **extra):
 
 
 class FakeGitHub:
-    def __init__(self, pull, files, comments=(), contents=None, head_after=None, permission="write"):
+    def __init__(self, pull, files, comments=(), contents=None, head_after=None, permission="write",
+                 merge_base="base000"):
         self._pull = pull
         self._files = list(files)
         self._comments = list(comments)
         self._contents = contents or {}
         self.head_after = head_after
         self._permission = permission
+        self._merge_base = merge_base
+        self.merge_base_calls = []
         self.created = []
         self.updated = []
         self.pull_reads = 0
@@ -91,6 +94,10 @@ class FakeGitHub:
 
     def permission(self, login):
         return self._permission
+
+    def merge_base(self, base, head):
+        self.merge_base_calls.append((base, head))
+        return self._merge_base
 
     def file_at(self, path, ref):
         return self._contents.get((path, ref))
@@ -160,11 +167,6 @@ class PRRiskTests(unittest.TestCase):
 
     def test_ineligible_reasons(self):
         patterns = pr_risk.deny_patterns("identity/**\n# comment\n")
-        # GitHub reports binaries and pure renames with no patch and zero changed lines.
-        binary = file("bin/helper", additions=0, changes=0)
-        del binary["patch"]
-        renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
-        del renamed["patch"]
         cases = {
             "draft": (pr(draft=True), [file()], "write"),
             "fork": (pr(fork=True), [file()], "write"),
@@ -173,8 +175,6 @@ class PRRiskTests(unittest.TestCase):
             "51 changed lines": (pr(additions=30, deletions=21), [file()], "write"),
             "deny list (`identity/**`)": (pr(), [file("identity/access.go")], "write"),
             "deny list (`.github/**`)": (pr(), [file("ci.yml", previous_filename=".github/workflows/ci.yml")], "write"),
-            "`bin/helper` has no reviewable text diff": (pr(additions=0), [binary], "write"),
-            "`b.yaml` has no reviewable text diff": (pr(additions=0), [renamed], "write"),
         }
         for expected, (p, files, permission) in cases.items():
             with self.subTest(expected=expected):
@@ -182,6 +182,11 @@ class PRRiskTests(unittest.TestCase):
         # pr() reports CONTRIBUTOR, as the API does for every private member; it must not matter.
         self.assertIsNone(pr_risk.ineligible_reason(pr(additions=25, deletions=25), [file()], patterns, "write"))
         self.assertIsNone(pr_risk.ineligible_reason(pr(), [file()], patterns, "admin"))
+        # A missing patch no longer rejects a PR here: gather synthesizes a diff for text files
+        # and only then decides, so binaries and pure renames are handled there.
+        patchless = file("data/table.txt")
+        del patchless["patch"]
+        self.assertIsNone(pr_risk.ineligible_reason(pr(), [patchless], patterns, "write"))
 
     def test_bot_author_is_silent(self):
         gh = FakeGitHub(pr(), [file()], permission="none")
@@ -197,6 +202,177 @@ class PRRiskTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIsNone(model_input)
         self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_patchless_data_file_is_classified(self):
+        # GitHub renders no patch for a file with megabyte-long lines, such as the canvas
+        # replay tables; the diff is synthesized from both contents, lines clipped, and the
+        # synthesized patch drives the context blocks like a rendered one would.
+        table = file("canvas-replay-table.txt", additions=1)
+        del table["patch"]
+        kept = "encoded aaa data:image/png;base64," + "A" * 80000
+        added = "encoded bbb data:image/png;base64," + "B" * 80000
+        gh = FakeGitHub(
+            pr(additions=1),
+            [table],
+            contents={
+                ("canvas-replay-table.txt", "base000"): kept,
+                ("canvas-replay-table.txt", "abc1234def"): kept + "\n" + added,
+            },
+        )
+        gate, code, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(gh.created), 1)
+        self.assertIn("diff synthesized from the file contents at both ends", model_input)
+        self.assertIn("+encoded bbb data:image/png;base64," + "B" * 156, model_input)
+        self.assertIn("[80,035 chars]", model_input)
+        self.assertIn('<context path="canvas-replay-table.txt"', model_input)
+        # The model never sees the megabytes: input stays small with the context included.
+        self.assertLess(len(model_input), 20000)
+
+    def test_clipped_pair_keeps_the_difference_visible(self):
+        # A change past the cut must not read as a no-op: the -/+ pair is clipped around the
+        # first difference, not at the same width.
+        shared = "z" * 300
+        patch = "@@ -1 +1 @@\n-" + shared + "ORIG\n+" + shared + "EVIL\n"
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("ORIG", model_input)
+        self.assertIn("EVIL", model_input)
+        self.assertIn("[300 chars]", model_input)
+        self.assertNotIn("z" * 200, model_input)
+
+    def test_clipped_pair_when_one_line_extends_the_other(self):
+        # An empty shared prefix with the shorter line inside the longer one's suffix: the
+        # middle of the shorter line stays empty instead of repeating the suffix.
+        tail = "b" * 250
+        patch = "@@ -1 +1 @@\n-" + tail + "\n+a" + tail + "\n"
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+…a…", model_input)
+        self.assertNotIn("b" * 200, model_input)
+
+    def test_deleted_content_starting_with_dashes_pairs_like_any_deletion(self):
+        # Only a synthesized patch's opening line is a --- header; a deleted line whose own
+        # content starts with dashes must not be mistaken for one.
+        shared = "z" * 300
+        patch = "@@ -1 +1 @@\n---" + shared + "ORIG\n+--" + shared + "EVIL\n"
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("ORIG", model_input)
+        self.assertIn("EVIL", model_input)
+        self.assertIn("[302 chars]", model_input)
+
+    def test_no_newline_marker_does_not_break_pairing(self):
+        shared = "z" * 300
+        patch = ("@@ -1 +1 @@\n-" + shared + "ORIG\n\\ No newline at end of file\n+"
+                 + shared + "EVIL\n")
+        gh = FakeGitHub(pr(additions=1, deletions=1), [file(patch=patch)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("ORIG", model_input)
+        self.assertIn("EVIL", model_input)
+        self.assertIn("\\ No newline at end of file", model_input)
+
+    def test_added_file_without_phantom_line_crosses_the_cap_exactly(self):
+        # A synthesized diff must not invent an extra changed line at the end of a file: a
+        # 50-line addition is exactly at the cap, not over it.
+        added = file("new.txt", status="added", additions=50)
+        del added["patch"]
+        head = "\n".join(f"row{i}" for i in range(50))
+        gh = FakeGitHub(pr(additions=50, deletions=0), [added],
+                        contents={("new.txt", "abc1234def"): head})
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+row49", model_input)
+        self.assertNotIn("+\n", model_input[200:])
+
+    def test_synthesized_diff_is_from_the_merge_base(self):
+        # The base branch tip can differ from the branch point; the synthesized diff must not
+        # fold main's own changes into the diff inverted.
+        table = file("table.txt", additions=1, deletions=1)
+        del table["patch"]
+        gh = FakeGitHub(
+            pr(additions=1, deletions=1), [table],
+            contents={
+                ("table.txt", "base000"): "stale content from the base branch tip\n",
+                ("table.txt", "merge000"): "one\n",
+                ("table.txt", "abc1234def"): "one\ntwo\n",
+            },
+            merge_base="merge000",
+        )
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertEqual(gh.merge_base_calls, [("base000", "abc1234def")])
+        self.assertIn("+two", model_input)
+        self.assertNotIn("stale", model_input)
+
+    def test_patchless_added_and_removed_files(self):
+        added = file("new.txt", status="added", additions=2)
+        del added["patch"]
+        removed = file("old.txt", status="removed", deletions=1)
+        del removed["patch"]
+        gh = FakeGitHub(pr(additions=2, deletions=1), [added, removed],
+                        contents={("new.txt", "abc1234def"): "a\nb\n",
+                                  ("old.txt", "base000"): "x\n"})
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+a", model_input)
+        self.assertIn("-x", model_input)
+
+    def test_binary_marked_text_counted_against_the_cap(self):
+        # GitHub reports zero line counts for content it treats as binary; the synthesized
+        # diff's own count is what the changed-lines cap sees for such files.
+        notes = file("notes.txt", additions=0, deletions=0)
+        del notes["patch"]
+        gh = FakeGitHub(
+            pr(additions=0), [notes],
+            contents={("notes.txt", "base000"): "",
+                      ("notes.txt", "abc1234def"): "\n".join(f"row{i}" for i in range(60)) + "\n"},
+        )
+        gate, code, model_input = self.run_pr(gh)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason"], "60 changed lines (limit 50)")
+        self.assertEqual(code, 0)
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_patchless_binary_stays_ineligible_and_silent(self):
+        # Binary or unfetchable content returns None from file_at; the decode and NUL paths
+        # are covered directly in test_file_at_treats_binary_content_as_missing.
+        binary = file("bin/helper", additions=0, changes=0)
+        del binary["patch"]
+        gh = FakeGitHub(pr(additions=0), [binary])
+        gate, code, model_input = self.run_pr(gh)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason"], "`bin/helper` has no reviewable text diff")
+        self.assertEqual(code, 0)
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_pure_rename_without_patch_stays_ineligible(self):
+        renamed = file("b.yaml", status="renamed", previous_filename="a.yaml", additions=0, changes=0)
+        del renamed["patch"]
+        same = "x: 1\n"
+        gh = FakeGitHub(pr(additions=0), [renamed],
+                        contents={("a.yaml", "base000"): same, ("b.yaml", "abc1234def"): same})
+        gate, code, model_input = self.run_pr(gh)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason"], "`b.yaml` has no reviewable text diff")
+        self.assertIsNone(model_input)
+        self.assertEqual((gh.created, gh.updated), ([], []))
+
+    def test_long_patch_lines_are_clipped(self):
+        long_line = "+  - " + "z" * 900
+        gh = FakeGitHub(pr(additions=1), [file(patch="@@ -1,1 +1,2 @@\n   - a\n" + long_line)])
+        gate, _, model_input = self.run_pr(gh)
+        self.assertTrue(gate["eligible"])
+        self.assertIn("+  - " + "z" * 195, model_input)
+        self.assertIn("[905 chars]", model_input)
+        self.assertNotIn("z" * 900, model_input)
 
     def test_eligible_creates_comment_with_verdict(self):
         gh = FakeGitHub(pr(), [file()])
@@ -324,6 +500,22 @@ class PRRiskTests(unittest.TestCase):
         self.assertEqual(calls[3]["args"][:4], ["api", "-X", "PATCH", "/repos/kernel/infra/issues/comments/9"])
         self.assertEqual(json.loads(calls[3]["stdin"]), {"body": "hello"})
         self.assertEqual(calls[4]["args"], ["api", "/repos/kernel/infra/collaborators/kernel-internal%5Bbot%5D/permission"])
+
+    def test_file_at_treats_binary_content_as_missing(self):
+        # Git calls content with NUL bytes binary — UTF-16 included — and renders no patch for
+        # it; undecodable bytes never become text either.
+        payloads = (b"he\x00llo", "hello".encode("utf-16"), b"\xff\xfe\x00h")
+        for raw in payloads:
+            with self.subTest(raw=raw):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / "gh").write_text(
+                        "#!/usr/bin/env python3\n"
+                        "import sys\n"
+                        f"sys.stdout.buffer.write({raw!r})\n")
+                    (root / "gh").chmod(0o755)
+                    with mock.patch.dict(os.environ, {"PATH": f"{root}:{os.environ['PATH']}"}):
+                        self.assertIsNone(pr_risk.GitHub("kernel/infra").file_at("a.txt", "abc"))
 
     def test_verdict_from_events(self):
         reply = json.dumps(VERDICT)

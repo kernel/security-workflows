@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import re
@@ -30,6 +31,11 @@ MAX_CONTEXT_LINES_PER_FILE = 400
 MAX_GUIDANCE_CHARS = 6000
 MAX_REASON_WORDS = 45
 MAX_HISTORY = 20
+# One line of diff or context longer than this is cut, keeping the shape of the change
+# readable without feeding the model megabytes of base64 — a canvas replay table line is ~76KB.
+MAX_LINE_CHARS = 200
+# The shared ends kept around the differing middle when a -/+ pair is clipped.
+PAIR_EDGE_CHARS = 80
 
 MARKER = "<!-- pr-risk-classifier -->"
 DATA_RE = re.compile(r"<!-- pr-risk:v1 (\{.*?\}) -->", re.S)
@@ -125,14 +131,26 @@ class GitHub:
         data = json.loads(self.api(f"/repos/{self.repo}/collaborators/{urllib.parse.quote(login)}/permission"))
         return data["permission"]
 
+    def merge_base(self, base: str, head: str) -> str:
+        """The commit a PR's diff is measured from, not the base branch tip."""
+        data = json.loads(self.api(f"/repos/{self.repo}/compare/{base}...{head}"))
+        return data["merge_base_commit"]["sha"]
+
     def file_at(self, path: str, ref: str) -> str | None:
         try:
-            return self.api("-H", "Accept: application/vnd.github.raw",
+            text = self.api("-H", "Accept: application/vnd.github.raw",
                             f"/repos/{self.repo}/contents/{urllib.parse.quote(path)}?ref={ref}")
+        except UnicodeDecodeError:
+            # Binary content does not decode as text; there is no diff to read.
+            return None
         except GitHubError as err:
             if "HTTP 403" in str(err) or "HTTP 404" in str(err):
                 return None
             raise
+        if "\x00" in text:
+            # Git treats NUL bytes as binary (UTF-16 and friends); no text diff either.
+            return None
+        return text
 
     def create_comment(self, number: int, body: str) -> None:
         self.api("-X", "POST", f"/repos/{self.repo}/issues/{number}/comments", body={"body": body})
@@ -190,9 +208,6 @@ def ineligible_reason(pr: dict[str, Any], files: list[dict[str, Any]], patterns:
             for pattern, regex in compiled:
                 if regex.match(path):
                     return f"`{path}` is on the deny list (`{pattern}`)"
-    for f in files:
-        if "patch" not in f:
-            return f"`{f['filename']}` has no reviewable text diff"
     return None
 
 
@@ -218,14 +233,14 @@ def hunk_ranges(patch: str) -> list[tuple[int, int]]:
 
 
 def context_snippets(content: str, patch: str) -> list[tuple[int, int, str]]:
-    lines = content.splitlines()
+    lines = content.split("\n")
     snippets = []
     budget = MAX_CONTEXT_LINES_PER_FILE
     for lo, hi in hunk_ranges(patch):
         hi = min(hi, len(lines), lo + budget - 1)
         if hi < lo:
             break
-        body = "\n".join(f"{n:>5} {lines[n - 1]}" for n in range(lo, hi + 1))
+        body = "\n".join(f"{n:>5} {clip_line(lines[n - 1])}" for n in range(lo, hi + 1))
         snippets.append((lo, hi, body))
         budget -= hi - lo + 1
     return snippets
@@ -235,8 +250,113 @@ def scrub(text: str) -> str:
     return UNTRUSTED_TAGS.sub("[tag removed]", text or "")
 
 
+def clip_line(line: str) -> str:
+    """One diff or context line, with very long lines cut to what the model can usefully read."""
+    if len(line) <= MAX_LINE_CHARS:
+        return line
+    return f"{line[:MAX_LINE_CHARS]}… [{len(line):,} chars]"
+
+
+def clip_middle(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}… [{len(text):,} chars]"
+
+
+def clip_pair(old: str, new: str) -> tuple[str, str]:
+    """One -/+ pair of a diff, clipped so the first place the lines differ stays visible.
+
+    Clipping both lines at the same width can hide the change: two lines sharing a long
+    prefix clip to identical visible text and the change reads as a no-op. The shared prefix
+    and suffix are cut to PAIR_EDGE_CHARS instead, leaving the differing middle in view.
+    """
+    if len(old) <= MAX_LINE_CHARS and len(new) <= MAX_LINE_CHARS:
+        return old, new
+    o, n = old[1:], new[1:]
+    prefix = os.path.commonprefix([o, n])
+    suffix = os.path.commonprefix([o[len(prefix):][::-1], n[len(prefix):][::-1]])[::-1]
+    om = o[len(prefix):len(o) - len(suffix)]
+    nm = n[len(prefix):len(n) - len(suffix)]
+    head, tail = clip_middle(prefix, PAIR_EDGE_CHARS), clip_middle(suffix, PAIR_EDGE_CHARS)
+    return (f"-{head}…{clip_middle(om, MAX_LINE_CHARS)}…{tail}",
+            f"+{head}…{clip_middle(nm, MAX_LINE_CHARS)}…{tail}")
+
+
+def clip_diff(text: str) -> str:
+    """A diff, clipped line by line, with the first difference of each -/+ pair kept visible."""
+    lines = text.split("\n")
+    # A synthesized patch opens with difflib's file headers; a GitHub patch opens at the first
+    # @@. So a line starting --- is a header only in the opening position — anywhere else it
+    # is a deleted line whose own content starts with dashes and must not break the pairing.
+    start = 2 if text.startswith("--- ") else 0
+    out = lines[:start]
+    i = start
+    while i < len(lines):
+        if lines[i][:1] not in ("+", "-"):
+            out.append(clip_line(lines[i]))
+            i += 1
+            continue
+        # A run of deletions and the additions that replace them. "\\ No newline at end of
+        # file" markers ride along inside a run, so a missing trailing newline does not stop
+        # the -/+ pairing.
+        j = i
+        while j < len(lines) and lines[j][:1] in ("-", "\\"):
+            j += 1
+        k = j
+        while k < len(lines) and lines[k][:1] in ("+", "\\"):
+            k += 1
+        run = lines[i:k]
+        olds = [x for x in run if x[:1] == "-"]
+        news = [x for x in run if x[:1] == "+"]
+        if news:
+            for o, n in zip(olds, news):
+                out.extend(clip_pair(o, n))
+            out.extend(clip_line(line) for line in olds[len(news):] + news[len(olds):])
+        else:
+            out.extend(clip_line(line) for line in olds)
+        out.extend(line for line in run if line[:1] == "\\")
+        i = k
+    return "\n".join(out)
+
+
+def count_changed_lines(patch: str) -> int:
+    """The + and - lines of a diff, which is what the changed-lines cap counts."""
+    lines = patch.split("\n")
+    # Only the opening lines can be file headers; a deleted line whose content starts with
+    # dashes is content and counts.
+    start = 2 if patch.startswith("--- ") else 0
+    return sum(1 for line in lines[start:] if line[:1] in ("+", "-"))
+
+
+def file_lines(text: str) -> list[str]:
+    """A file's lines the way git sees them: no phantom line after a trailing newline."""
+    if not text:
+        return []
+    lines = text.split("\n")
+    return lines[:-1] if text.endswith("\n") else lines
+
+
+def synthesize_patch(gh: GitHub, f: dict[str, Any], base_sha: str, head: str | None) -> str | None:
+    """A unified diff for a file GitHub renders no patch for, from the merge base to the head.
+
+    GitHub omits the patch when the diff is too large to show, which is normal for files with
+    very long lines, such as data tables — not only binaries, the old assumption. `head` is
+    the file's content at the PR head, already fetched for the context; `base_sha` is the
+    merge base, which is what GitHub measures the diff and the line counts from, so changes
+    made on the base branch after the branch point do not leak into the diff inverted.
+    Binary or unfetchable content (None from file_at), and no content change between the two
+    ends (no hunks), return None so the PR stays ineligible as before.
+    """
+    old_path = f.get("previous_filename") or f["filename"]
+    base = "" if f["status"] == "added" else gh.file_at(old_path, base_sha)
+    if base is None or head is None:
+        return None
+    patch = "\n".join(difflib.unified_diff(
+        file_lines(base), file_lines(head),
+        fromfile=f"a/{old_path}", tofile=f"b/{f['filename']}", lineterm=""))
+    return patch if "@@" in patch else None
+
+
 def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str | None,
-                contents: dict[str, str]) -> str:
+               contents: dict[str, str], synthesized: dict[str, str]) -> str:
     out = [
         "# Pull request",
         f"Repository: {pr['base']['repo']['full_name']}",
@@ -262,12 +382,19 @@ def build_input(pr: dict[str, Any], files: list[dict[str, Any]], guidance: str |
     out += ["## Diff", "<diff>"]
     for f in files:
         name = f"{f.get('previous_filename')} -> {f['filename']}" if f.get("previous_filename") else f["filename"]
-        out += [f"### {name} ({f['status']}, +{f['additions']} -{f['deletions']})", scrub(f.get("patch", ""))]
+        patch = f.get("patch")
+        origin = ""
+        if patch is None:
+            patch = synthesized.get(f["filename"], "")
+            origin = " · diff synthesized from the file contents at both ends, as GitHub renders none"
+        out += [f"### {name} ({f['status']}, +{f['additions']} -{f['deletions']}{origin})",
+                clip_diff(scrub(patch))]
     out += ["</diff>", ""]
     snippets = []
     for f in files:
         if f["filename"] in contents:
-            for lo, hi, body in context_snippets(contents[f["filename"]], f.get("patch", "")):
+            patch = f.get("patch") or synthesized.get(f["filename"], "")
+            for lo, hi, body in context_snippets(contents[f["filename"]], patch):
                 snippets += [f'<context path="{f["filename"]}" lines="{lo}-{hi}">', scrub(body), "</context>"]
     if snippets:
         out += ["## Surrounding code at the PR head (line-numbered)"] + snippets
@@ -297,14 +424,7 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
     files = gh.files(number)
     existing = find_comment(gh.comments(number))
     reason = ineligible_reason(pr, files, deny_patterns(extra_deny), gh.permission(pr["user"]["login"]))
-    gate = {
-        "sha": pr["head"]["sha"],
-        "eligible": reason is None,
-        "reason": reason,
-        "changed_lines": pr["additions"] + pr["deletions"],
-        "comment_id": existing["id"] if existing else None,
-        "previous": previous_data(existing["body"]) if existing else None,
-    }
+    synthesized = {}
     if reason is None:
         # Guidance comes from the base branch so the PR under review cannot rewrite it.
         guidance = gh.file_at("AGENTS.md", pr["base"]["sha"])
@@ -314,7 +434,35 @@ def gather(gh: GitHub, number: int, extra_deny: str, out: Path) -> dict[str, Any
                 text = gh.file_at(f["filename"], pr["head"]["sha"])
                 if text is not None:
                     contents[f["filename"]] = text
-        (out / "input.md").write_text(build_input(pr, files, guidance, contents))
+        # A missing patch means binary or unfetchable content (ineligible, as before) or a diff
+        # too large for GitHub to render, which is diffed from the merge base — the commit
+        # GitHub measures the diff and the line counts from, so base-branch changes made after
+        # the branch point do not leak into the synthesized diff inverted.
+        base_sha = gh.merge_base(pr["base"]["sha"], pr["head"]["sha"])
+        changed = pr["additions"] + pr["deletions"]
+        for f in files:
+            if "patch" not in f:
+                head = "" if f["status"] == "removed" else contents.get(f["filename"])
+                patch = synthesize_patch(gh, f, base_sha, head)
+                if patch is None:
+                    reason = f"`{f['filename']}` has no reviewable text diff"
+                    break
+                synthesized[f["filename"]] = patch
+                # GitHub reports zero line counts for content it treats as binary, so the
+                # synthesized diff's own count is what the size cap sees for those files.
+                changed += count_changed_lines(patch) - (f["additions"] + f["deletions"])
+        if reason is None and changed > MAX_CHANGED_LINES:
+            reason = f"{changed} changed lines (limit {MAX_CHANGED_LINES})"
+    if reason is None:
+        (out / "input.md").write_text(build_input(pr, files, guidance, contents, synthesized))
+    gate = {
+        "sha": pr["head"]["sha"],
+        "eligible": reason is None,
+        "reason": reason,
+        "changed_lines": pr["additions"] + pr["deletions"],
+        "comment_id": existing["id"] if existing else None,
+        "previous": previous_data(existing["body"]) if existing else None,
+    }
     (out / "gate.json").write_text(json.dumps(gate, indent=2))
     write_output("eligible", "true" if reason is None else "false")
     write_output("commented", "true" if existing else "false")
