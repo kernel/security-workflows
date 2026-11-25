@@ -113,6 +113,16 @@ jobs:
             *) refuse "This PR was opened by someone outside the org. Breakglass is for our own changes that cannot wait for a review, not for merging a contribution unreviewed." ;;
           esac
 
+          # Two people. The association checks above say an org member asked and an
+          # org member wrote the change, but both can be one credential: without this
+          # check, that single credential could push a branch, open a PR and breakglass
+          # it into the default branch with no second person involved. A breakglass
+          # merge is one member's change vouched for by another -- the author writes it,
+          # the requester says it cannot wait.
+          if [ "$(echo "$pr" | jq -r .user.login)" = "$ACTOR" ]; then
+            refuse "You opened this PR, so a second person has to vouch: ask another org member to comment the \\`/breakglass\\` request on it."
+          fi
+
           reason="$(printf '%s' "$rest" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
           if [ "${#reason}" -lt 10 ]; then
             refuse "Give a reason of at least 10 characters: \`/breakglass prod-jfk-unikraft-9 wedged, api 5xx\`. Whoever reads this commit later has only what you type here."
